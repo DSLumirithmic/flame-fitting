@@ -3,7 +3,7 @@
 #           'mesh_to_scan_function', 'full_mesh_to_scan_function', 'vecdiff_function']
 
 from scipy.sparse import csc_matrix
-from scipy import array
+from numpy import array
 import scipy as sy
 import scipy.sparse as sp
 import numpy as np

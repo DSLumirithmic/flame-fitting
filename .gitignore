@@ -1,1 +1,33 @@
 *.pyc
+
+# FLAME model assets (licensed, not for redistribution) and generated meshes
+*.pkl
+*.npz
+*.npy
+*.obj
+*.ply
+*.lic
+
+# vendored eigen source tree (build dependency, not our code)
+/eigen/
+
+# python / uv environment
+.venv/
+__pycache__/
+.uv/
+
+# compiled extensions / build artifacts
+*.so
+*.o
+build/
+
+# fitting outputs, logs
+output/
+outputs/
+results/
+logs/
+*.log
+
+# editors
+.vscode/
+.idea/

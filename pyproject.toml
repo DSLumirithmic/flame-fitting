@@ -1,0 +1,53 @@
+[project]
+name = "flame-fitting"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+# chumpy uses inspect.getargspec, removed in 3.11 -> hard upper bound
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "numpy>=1.23,<1.24",
+    "chumpy==0.70",
+    "opencv-python>=4.10,<4.11",
+    "werkzeug>=3.0,<4",
+    # Locally-built wheel (see [tool.uv.sources]) -- not on PyPI.
+    "psbody-mesh==0.4",
+    # Pinned to +cu128 builds (see [tool.uv.sources]/[[tool.uv.index]] below) --
+    # the default PyPI wheels ship CUDA 12.6 kernels, which don't include
+    # sm_120 (Blackwell / RTX 50-series), so torch.cuda would report
+    # "no kernel image is available for execution on the device".
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "torchaudio==2.7.1",
+]
+
+[dependency-groups]
+# Cython is only needed to compile extensions (psbody-mesh etc.), not at runtime.
+# Held below 3.0 because legacy .pyx sources break on Cython 3 defaults.
+build = [
+    "cython>=0.29.37,<3.0",
+    "setuptools>=61",
+    "numpy>=1.23,<1.24",
+]
+
+# flame-fitting is a script repo, not an installable library: no build-system table
+# and package = false, so uv manages the env without trying to build the project.
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+torchaudio = [{ index = "pytorch-cu128" }]
+psbody-mesh = { path = "/home/linuxmsi/wheels/psbody_mesh-0.4-cp310-cp310-linux_x86_64.whl" }
+
+# chumpy ships an sdist with no pyproject.toml (legacy setuptools backend) and its
+# setup.py imports pip to parse its own requirements.txt. Neither is present in
+# uv's isolated build env by default, so inject them here.
+[tool.uv.extra-build-dependencies]
+chumpy = ["setuptools", "wheel", "pip"]
