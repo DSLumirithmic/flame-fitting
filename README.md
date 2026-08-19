@@ -20,7 +20,14 @@ and the [supplementary video](https://youtu.be/36rPTkhiJTM).
 This codebase demonstrates
  * **Sampling:** Load and evaluate FLAME model for random parameters
  * **Landmark fitting:** Fit FLAME to 3D landmarks
- * **Scan fitting:** Fit FLAME to a 3D scan
+ * **Scan fitting:** Fit FLAME to a 3D scan (CPU, or GPU via `fit_scan_torch.py`)
+
+This fork additionally supports fitting Google's
+[GNM](https://github.com/google/gnm) head model to a 3D scan
+(`fit_scan_gnm.py`, GPU only) as an alternative to FLAME, plus a tool
+(`scan_landmarks/`) to generate 3D landmarks for either model directly from a
+calibrated multi-view photogrammetry scan. See **[FITTING.md](FITTING.md)**
+for the full walkthrough (landmark generation -> fitting, both models).
 
 <p align="center"> 
 <img src="gifs/fitting_scan.gif" width="60%">
@@ -28,7 +35,24 @@ This codebase demonstrates
 
 ### Set-up
 
-The code has been tested with Python 3.6.9.
+**This fork uses [`uv`](https://docs.astral.sh/uv/) instead of the
+pip/virtualenv steps below** -- see `pyproject.toml`. From the repo root:
+```
+uv sync
+uv run python fit_scan_torch.py    # or fit_scan_gnm.py, hello_world.py, etc.
+```
+`uv sync` installs FLAME's dependencies (`chumpy`, `psbody-mesh` -- see
+`[tool.uv.sources]` in `pyproject.toml` for the locally-built wheel path) and
+GNM's (`gnm-shape[pytorch]`, pulled from the local GNM checkout). It does
+*not* install `scan_landmarks/`'s dependencies (`dlib`, `face-alignment`,
+`open3d`, ...) -- see [FITTING.md](FITTING.md) for why and what to use
+instead. The original pip/virtualenv instructions below are kept for
+reference/attribution to the upstream project but are no longer how this
+fork is actually set up.
+
+The original codebase was tested with Python 3.6.9; this fork is pinned to
+Python 3.10 (`requires-python` in `pyproject.toml`) because `chumpy` uses
+`inspect.getargspec`, removed in Python 3.11.
 
 Clone the git project:
 ```
@@ -88,10 +112,14 @@ To download the FLAME model, sign up and agree to the model license under [MPI-I
 ### Demo
 
  * Load and evaluate FLAME model: `hello_world.py`
- * Fit FLAME to 3D landmarks: `fit_lmk3d.py`
- * Fit FLAME to a 3D scan: `fit_scan.py`
+ * Fit FLAME to 3D landmarks (CPU, chumpy): `fit_lmk3d.py`
+ * Fit FLAME to a 3D scan (CPU, chumpy): `fit_scan.py`
+ * Fit FLAME to a 3D scan (GPU, PyTorch, takes `--scan`/`--landmarks`/`--output_dir`): `fit_scan_torch.py`
+ * Fit GNM to a 3D scan (GPU, PyTorch, same CLI as above): `fit_scan_gnm.py`
 
-Fitting a scan requires scan and FLAME model to be in the same local coordiante systems. The `fit_scan.py` script provides different options by specifying the variable `scale_unit` to convert from Meters [m] (default), Centimeters [cm], or Milimieters [mm]. Please specify the right unit when running `fit_scan.py`. If the unit of the measurement unit is unknown, choose `scale_unit = 'NA'`.
+Fitting a scan requires scan and FLAME model to be in the same local coordiante systems. The `fit_scan.py` script provides different options by specifying the variable `scale_unit` to convert from Meters [m] (default), Centimeters [cm], or Milimieters [mm]. Please specify the right unit when running `fit_scan.py`. If the unit of the measurement unit is unknown, choose `scale_unit = 'NA'`. `fit_scan_torch.py`/`fit_scan_gnm.py` take the equivalent `--scan_unit` flag instead of a hardcoded variable.
+
+See **[FITTING.md](FITTING.md)** for a full end-to-end walkthrough, including how to generate the 3D landmarks a scan-fitting script needs from your own scan.
 
 ### Landmarks
 

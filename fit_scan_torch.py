@@ -17,9 +17,13 @@ regularizers) and same weights as fit_scan.py, but:
     port of the same math (see sbody/robustifiers.py for the Geman-McClure
     derivation this reproduces).
 
-Usage: uv run python fit_scan_torch.py
+Usage:
+  uv run python fit_scan_torch.py
+  uv run python fit_scan_torch.py --scan /path/to/model.obj \
+      --landmarks /path/to/landmarks_flame/landmarks.npy --output_dir ./output/flame_fit
 '''
 
+import argparse
 import numpy as np
 import torch
 from os.path import join
@@ -143,10 +147,25 @@ def fit_scan_gpu(scan_v, lmk_3d, model, lmk_face_idx, lmk_b_coords, weights, gmo
 
 # -----------------------------------------------------------------------------
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Fit FLAME to a scan + 3D landmarks (GPU).")
+    parser.add_argument('--scan', default='./data/scan.obj',
+                         help="Scan mesh, e.g. model.obj (default: ./data/scan.obj).")
+    parser.add_argument('--landmarks', default='./data/scan_lmks.npy',
+                         help="(51,3) landmark .npy, e.g. from generate_scan_landmarks.py --flame "
+                              "(default: ./data/scan_lmks.npy).")
+    parser.add_argument('--output_dir', default='./output',
+                         help="Output folder for the fitted mesh (default: ./output).")
+    parser.add_argument('--scan_unit', default='m', choices=['m', 'cm', 'mm'],
+                         help="Unit the scan/landmarks are stored in (default: m).")
+    return parser.parse_args()
+
+
 def run_fitting():
-    scan_path = './data/scan.obj'
-    scan_lmk_path = './data/scan_lmks.npy'
-    scan_unit = 'm'
+    args = parse_args()
+    scan_path = args.scan
+    scan_lmk_path = args.landmarks
+    scan_unit = args.scan_unit
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print("using device:", device, "-", torch.cuda.get_device_name(0) if device == 'cuda' else 'CPU')
@@ -155,7 +174,11 @@ def run_fitting():
     print("loaded scan from:", scan_path)
 
     lmk_3d = np.load(scan_lmk_path).astype(np.float64)
-    print("loaded scan landmark from:", scan_lmk_path)
+    print("loaded scan landmark from:", scan_lmk_path, "-", lmk_3d.shape[0], "points")
+    if lmk_3d.shape[0] != 51:
+        raise ValueError(
+            f"fit_scan_torch.py expects FLAME's 51-point landmark convention, got {lmk_3d.shape[0]} "
+            f"points -- use generate_scan_landmarks.py --flame (not --gnm) to produce these.")
 
     model_path = './models/generic_model.pkl'
     model = FlameTorch(model_path, device=device, dtype=torch.float32)
@@ -170,7 +193,7 @@ def run_fitting():
     scan.v[:] *= scale_factor
     lmk_3d[:] *= scale_factor
 
-    output_dir = './output'
+    output_dir = args.output_dir
     safe_mkdir(output_dir)
 
     weights = {}

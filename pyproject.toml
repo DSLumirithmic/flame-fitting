@@ -19,6 +19,7 @@ dependencies = [
     "torch==2.7.1",
     "torchvision==0.22.1",
     "torchaudio==2.7.1",
+    "gnm-shape[pytorch]",
 ]
 
 [dependency-groups]
@@ -45,6 +46,7 @@ torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]
 torchaudio = [{ index = "pytorch-cu128" }]
 psbody-mesh = { path = "/home/linuxmsi/wheels/psbody_mesh-0.4-cp310-cp310-linux_x86_64.whl" }
+gnm-shape = { path = "../GNM/gnm/shape", editable = true }
 
 # chumpy ships an sdist with no pyproject.toml (legacy setuptools backend) and its
 # setup.py imports pip to parse its own requirements.txt. Neither is present in
