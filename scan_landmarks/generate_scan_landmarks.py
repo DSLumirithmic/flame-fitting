@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
@@ -630,15 +632,60 @@ def load_and_prepare_image(image_path, cam):
     return cv2.undistort(image_rgb, K, dist_coeffs)
 
 
-def detect_landmarks_all_views(matched_cameras, dlib_detector, dlib_predictor, fan_model):
+_dlib_thread_local = threading.local()
+
+
+def _get_thread_local_dlib(facial_detector_path):
+    """dlib's shape_predictor (and its face detector, out of the same caution)
+    are NOT safe to call concurrently from multiple threads against a single
+    shared instance -- verified empirically: an earlier version of this thread
+    pool shared one dlib_detector/dlib_predictor pair across all worker
+    threads, and concurrent calls corrupted the returned point positions
+    (dlib-sourced landmarks came back with 200-700px reprojection error
+    instead of the normal tens-of-px range, while FAN-sourced ones in the
+    same run were fine). Each worker thread gets its own independent
+    detector/predictor instead, built lazily on first use and cached for the
+    thread's lifetime (dlib.shape_predictor's constructor mmaps the .dat file,
+    so building it once per thread rather than once per image still avoids
+    per-call overhead)."""
+    if getattr(_dlib_thread_local, "facial_detector_path", None) != facial_detector_path:
+        _dlib_thread_local.detector = dlib.get_frontal_face_detector()
+        _dlib_thread_local.predictor = dlib.shape_predictor(facial_detector_path)
+        _dlib_thread_local.facial_detector_path = facial_detector_path
+    return _dlib_thread_local.detector, _dlib_thread_local.predictor
+
+
+def _detect_one_view(args):
+    """Per-camera worker for detect_landmarks_all_views()'s thread pool: image
+    load/undistort (cv2, releases the GIL) + dlib (via its own thread-local
+    detector/predictor, see _get_thread_local_dlib()) + FAN (torch inference,
+    releases the GIL around the actual compute, and empirically fine to share
+    across threads -- only dlib corrupted results when shared)."""
+    cam, facial_detector_path, fan_model = args
+    dlib_detector, dlib_predictor = _get_thread_local_dlib(facial_detector_path)
+    image_rgb = load_and_prepare_image(cam.image_path, cam)
+    if image_rgb is None:
+        return cam, None
+    landmarks_2d, valid, confidence = detect_landmarks(image_rgb, dlib_detector, dlib_predictor, fan_model)
+    return cam, dict(landmarks_2d=landmarks_2d, valid=valid, confidence=confidence, cam=cam)
+
+
+def detect_landmarks_all_views(matched_cameras, facial_detector_path, fan_model, num_workers=1):
     per_view = {}
-    for cam in matched_cameras:
-        image_rgb = load_and_prepare_image(cam.image_path, cam)
-        if image_rgb is None:
+    tasks = [(cam, facial_detector_path, fan_model) for cam in matched_cameras]
+    if num_workers <= 1:
+        pairs = map(_detect_one_view, tasks)
+    else:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # executor.map preserves submission order in its results, even though
+            # the underlying work completes concurrently/out of order -- so this
+            # print loop still reports cameras in the same order as sequential mode.
+            pairs = list(executor.map(_detect_one_view, tasks))
+    for cam, entry in pairs:
+        if entry is None:
             continue
-        landmarks_2d, valid, confidence = detect_landmarks(image_rgb, dlib_detector, dlib_predictor, fan_model)
-        per_view[cam.label] = dict(landmarks_2d=landmarks_2d, valid=valid, confidence=confidence, cam=cam)
-        print(f"Camera {cam.label}: {int(valid.sum())}/{NUM_LANDMARKS}")
+        per_view[cam.label] = entry
+        print(f"Camera {cam.label}: {int(entry['valid'].sum())}/{NUM_LANDMARKS}")
     return per_view
 
 
@@ -822,11 +869,24 @@ def group_of(landmark_idx):
     raise ValueError(landmark_idx)
 
 
-def fuse_all_landmarks(candidates, mesh_query):
+def fuse_all_landmarks(candidates, mesh_query, num_workers=1):
     print()
     results = [None] * NUM_LANDMARKS
-    for i in range(NUM_LANDMARKS):
-        fused = robust_fuse_candidates(candidates[i], mesh_query)
+
+    # This first pass is the O(views^2)-per-landmark hot spot at high view counts
+    # (reprojection-consistency scoring inside robust_fuse_candidates() compares
+    # every surviving candidate against every original observation). Each
+    # landmark's fusion is fully independent of every other's, so this is safe
+    # to parallelize -- unlike the fallback pass below, which needs THIS pass's
+    # results for every landmark first and stays sequential.
+    if num_workers <= 1:
+        fused_list = [robust_fuse_candidates(candidates[i], mesh_query) for i in range(NUM_LANDMARKS)]
+    else:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            fused_list = list(executor.map(
+                lambda i: robust_fuse_candidates(candidates[i], mesh_query), range(NUM_LANDMARKS)))
+
+    for i, fused in enumerate(fused_list):
         results[i] = fused
         n_views = len(candidates[i])
         status = fused["status"] if fused else "PENDING_FALLBACK"
@@ -860,44 +920,58 @@ def fuse_all_landmarks(candidates, mesh_query):
 # =====================================================================================
 
 
-def compute_reprojection_diagnostics(results, per_view):
+def _reprojection_stats_for_landmark(args):
+    i, res, per_view = args
+    errors = []
+    views_used = []
+    for label, view in per_view.items():
+        if not view["valid"][i]:
+            continue
+        uv, z = project_point(res["point"], view["cam"])
+        if z[0] <= 0:
+            continue
+        err = float(np.linalg.norm(uv[0] - view["landmarks_2d"][i]))
+        errors.append(err)
+        views_used.append(label)
+
+    median_err = float(np.median(errors)) if errors else None
+    stats = dict(
+        landmark_index=i,
+        xyz=res["point"].tolist(),
+        status=res["status"],
+        confidence=0.0 if res["status"] == "fallback_zero_views" else (
+            1.0 if res["status"] == "fused" else 0.5
+        ),
+        num_views=len(views_used),
+        contributing_views=views_used,
+        mean_reprojection_error_px=float(np.mean(errors)) if errors else None,
+        median_reprojection_error_px=median_err,
+        max_reprojection_error_px=float(np.max(errors)) if errors else None,
+    )
+    return stats, errors
+
+
+def compute_reprojection_diagnostics(results, per_view, num_workers=1):
     """For each final landmark, reprojects it into every view where a 2D
     detection for that index exists (not just the views that ended up
     'contributing' after outlier rejection) and reports pixel error stats."""
     print()
+    tasks = [(i, res, per_view) for i, res in enumerate(results)]
+    if num_workers <= 1:
+        pairs = [_reprojection_stats_for_landmark(t) for t in tasks]
+    else:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            pairs = list(executor.map(_reprojection_stats_for_landmark, tasks))
+
     per_landmark_stats = []
     all_errors = []
-    for i, res in enumerate(results):
-        errors = []
-        views_used = []
-        for label, view in per_view.items():
-            if not view["valid"][i]:
-                continue
-            uv, z = project_point(res["point"], view["cam"])
-            if z[0] <= 0:
-                continue
-            err = float(np.linalg.norm(uv[0] - view["landmarks_2d"][i]))
-            errors.append(err)
-            views_used.append(label)
-
-        median_err = float(np.median(errors)) if errors else None
-        stats = dict(
-            landmark_index=i,
-            xyz=res["point"].tolist(),
-            status=res["status"],
-            confidence=0.0 if res["status"] == "fallback_zero_views" else (
-                1.0 if res["status"] == "fused" else 0.5
-            ),
-            num_views=len(views_used),
-            contributing_views=views_used,
-            mean_reprojection_error_px=float(np.mean(errors)) if errors else None,
-            median_reprojection_error_px=median_err,
-            max_reprojection_error_px=float(np.max(errors)) if errors else None,
-        )
+    for stats, errors in pairs:
         per_landmark_stats.append(stats)
         all_errors.extend(errors)
+        median_err = stats["median_reprojection_error_px"]
         median_str = f"{median_err:.2f} px" if median_err is not None else "n/a"
-        print(f"Landmark {i:02d}: {len(views_used)} valid views | median reproj {median_str}")
+        print(f"Landmark {stats['landmark_index']:02d}: {stats['num_views']} valid views | "
+              f"median reproj {median_str}")
 
     overall = dict(
         mean_reprojection_error_px=float(np.mean(all_errors)) if all_errors else None,
@@ -1042,6 +1116,12 @@ def main():
                          help="Path to dlib's shape_predictor_68_face_landmarks.dat "
                               "(same file script-1--neural-registration.py uses; defaults "
                               "to the copy at the repository root).")
+    parser.add_argument("-j", "--workers", type=int, default=min(8, os.cpu_count() or 4),
+                         help="Thread-pool size for per-view detection and per-landmark fusion "
+                              "(default: %(default)s). These are the two hot spots that scale "
+                              "with view count -- fusion in particular is O(views^2) per "
+                              "landmark, so it dominates at high view counts. Pass 1 to disable "
+                              "and run fully sequential.")
     args = parser.parse_args()
     set_landmark_convention("gnm" if args.gnm else "flame")
 
@@ -1118,12 +1198,14 @@ def main():
     print(f"[INFO] dlib (CPU) sources indices 0-{NUM_DLIB_LANDMARKS_USED - 1}; "
           f"face-alignment/FAN ({device}) sources indices {NUM_DLIB_LANDMARKS_USED}-{NUM_LANDMARKS - 1} "
           f"-- see module docstring for why FAN substitutes for script-1's MediaPipe call.")
-    dlib_detector = dlib.get_frontal_face_detector()
-    dlib_predictor = dlib.shape_predictor(args.facial_detector)
+    print(f"[INFO] using {args.workers} worker thread(s) for per-view detection and per-landmark fusion")
+    if not os.path.isfile(args.facial_detector):
+        sys.exit(f"[ERROR] --facial-detector not found: {args.facial_detector}")
     fan_model = face_alignment.FaceAlignment(
         face_alignment.LandmarksType.TWO_D, device=device, flip_input=False, compile=False,
     )
-    per_view = detect_landmarks_all_views(matched_cameras, dlib_detector, dlib_predictor, fan_model)
+    per_view = detect_landmarks_all_views(
+        matched_cameras, args.facial_detector, fan_model, num_workers=args.workers)
     if not per_view:
         sys.exit("[ERROR] No usable views after landmark detection (all failed to load or detect a face).")
 
@@ -1132,13 +1214,13 @@ def main():
     print("Multi-view landmark reconstruction")
     print("=" * 60)
     candidates = generate_ray_candidates(per_view, mesh_query)
-    results = fuse_all_landmarks(candidates, mesh_query)
+    results = fuse_all_landmarks(candidates, mesh_query, num_workers=args.workers)
 
     print()
     print("=" * 60)
     print("Reprojection validation")
     print("=" * 60)
-    per_landmark_stats, overall = compute_reprojection_diagnostics(results, per_view)
+    per_landmark_stats, overall = compute_reprojection_diagnostics(results, per_view, num_workers=args.workers)
 
     print()
     print("=" * 60)

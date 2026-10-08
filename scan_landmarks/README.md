@@ -58,15 +58,11 @@ This tool instead:
 
 - `shape_predictor_68_face_landmarks.dat` (dlib's model file). Defaults to the
   copy at the repository root; pass `--facial-detector` to point elsewhere.
-- **Not** flame-fitting's own `.venv`: this script's dependencies (`dlib`,
-  `face-alignment`, `open3d`, `beautifulsoup4`, `pillow`) aren't in this
-  repo's `pyproject.toml`. Run it with an environment that has them --
-  e.g. the sibling `RegistrationAnimator` project's `uv` environment:
-  ```bash
-  cd /path/to/RegistrationAnimator
-  uv run python /path/to/flame-fitting/scan_landmarks/generate_scan_landmarks.py \
-      -i /path/to/scan_folder --gnm
-  ```
+- This repo's own uv environment (`uv sync` at the repo root) has every
+  dependency (`dlib-bin`, `face-alignment`, `open3d`, `beautifulsoup4` +
+  `lxml`, `pillow`). The shape predictor ships with the
+  `face-recognition-models` package; `run_gnm_pipeline.py` finds it
+  automatically, or pass `--facial-detector` when calling this script directly.
   `face-alignment` will download its pretrained weights (~90MB, PyTorch Hub /
   adrianbulat.com) on first use if not already cached.
 

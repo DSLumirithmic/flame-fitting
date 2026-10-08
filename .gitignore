@@ -31,3 +31,6 @@ logs/
 # editors
 .vscode/
 .idea/
+
+# fit_eval.py caches GNM template masks here
+.fit_eval_cache/

@@ -1,168 +1,79 @@
-# FLAME: Articulated Expressive 3D Head Model
+# gnm-fitting
 
-This is an official [FLAME](http://flame.is.tue.mpg.de/) repository. 
-
-We also provide [Tensorflow FLAME](https://github.com/TimoBolkart/TF_FLAME) and [PyTorch FLAME](https://github.com/HavenFeng/photometric_optimization) frameworks, and code to [convert from Basel Face Model to FLAME](https://github.com/TimoBolkart/BFM_to_FLAME).
-
-<p align="center"> 
-<img src="gifs/model_variations.gif">
-</p>
-
-FLAME is a lightweight and expressive generic head model learned from over 33,000 of accurately aligned 3D scans. FLAME combines a linear identity shape space (trained from head scans of 3800 subjects) with an articulated neck, jaw, and eyeballs, pose-dependent corrective blendshapes, and additional global expression blendshapes. For details please see the [scientific publication](https://ps.is.tuebingen.mpg.de/uploads_file/attachment/attachment/400/paper.pdf)
+Fits Google's [GNM](https://github.com/google/gnm) head model (v3, head
+variant) to a 3D scan, using 68-point iBUG landmarks detected directly on the
+scan from its calibrated photos.
 
 ```
-Learning a model of facial shape and expression from 4D scans
-Tianye Li*, Timo Bolkart*, Michael J. Black, Hao Li, and Javier Romero
-ACM Transactions on Graphics (Proc. SIGGRAPH Asia) 2017
-```
-and the [supplementary video](https://youtu.be/36rPTkhiJTM).
-
-This codebase demonstrates
- * **Sampling:** Load and evaluate FLAME model for random parameters
- * **Landmark fitting:** Fit FLAME to 3D landmarks
- * **Scan fitting:** Fit FLAME to a 3D scan (CPU, or GPU via `fit_scan_torch.py`)
-
-This fork additionally supports fitting Google's
-[GNM](https://github.com/google/gnm) head model to a 3D scan
-(`fit_scan_gnm.py`, GPU only) as an alternative to FLAME, plus a tool
-(`scan_landmarks/`) to generate 3D landmarks for either model directly from a
-calibrated multi-view photogrammetry scan. See **[FITTING.md](FITTING.md)**
-for the full walkthrough (landmark generation -> fitting, both models).
-
-<p align="center"> 
-<img src="gifs/fitting_scan.gif" width="60%">
-</p>
-
-### Set-up
-
-**This fork uses [`uv`](https://docs.astral.sh/uv/) instead of the
-pip/virtualenv steps below** -- see `pyproject.toml`. From the repo root:
-```
-uv sync
-uv run python fit_scan_torch.py    # or fit_scan_gnm.py, hello_world.py, etc.
-```
-`uv sync` installs FLAME's dependencies (`chumpy`, `psbody-mesh` -- see
-`[tool.uv.sources]` in `pyproject.toml` for the locally-built wheel path) and
-GNM's (`gnm-shape[pytorch]`, pulled from the local GNM checkout). It does
-*not* install `scan_landmarks/`'s dependencies (`dlib`, `face-alignment`,
-`open3d`, ...) -- see [FITTING.md](FITTING.md) for why and what to use
-instead. The original pip/virtualenv instructions below are kept for
-reference/attribution to the upstream project but are no longer how this
-fork is actually set up.
-
-The original codebase was tested with Python 3.6.9; this fork is pinned to
-Python 3.10 (`requires-python` in `pyproject.toml`) because `chumpy` uses
-`inspect.getargspec`, removed in Python 3.11.
-
-Clone the git project:
-```
-git clone https://github.com/Rubikplayer/flame-fitting.git
+scan folder (model.obj + calibration.xml + views/)
+   -> scan_landmarks/generate_scan_landmarks.py --gnm   (68 3D landmarks)
+   -> fit_scan_gnm.py                                   (GNM identity/expression/pose)
+   -> fit_eval.py                                       (surface-error report + heatmaps)
 ```
 
-Install pip and virtualenv
+`run_gnm_pipeline.py` runs all three. See [FITTING_README.md](FITTING_README.md)
+for how the fit works and what it writes, and
+[scan_landmarks/README.md](scan_landmarks/README.md) for the landmark step.
+
+## Setup (Windows or Linux, uv)
+
+Expects the GNM repo checked out next to this one (`../GNM`, used as an
+editable `gnm-shape` source):
 
 ```
-sudo apt-get install python3-pip python3-venv
+GitHub/
+  GNM/            # github.com/google/gnm
+  GNM-fit/        # this repo
 ```
 
-Set up virtual environment:
-```
-mkdir <your_home_dir>/.virtualenvs
-python3 -m venv <your_home_dir>/.virtualenvs/flame-fitting
+```bash
+uv sync           # Python 3.10, torch 2.7.1+cu128 (RTX 50-series OK)
 ```
 
-Activate virtual environment:
-```
-cd flame-fitting
-source <your_home_dir>/.virtualenvs/flame-fitting/bin/activate
-```
+One environment covers everything: torch/gnm-shape for the fit, and
+dlib-bin / face-alignment / open3d / bs4+lxml / pillow for landmarks. dlib's
+`shape_predictor_68_face_landmarks.dat` comes from the
+`face-recognition-models` package and is found automatically. face-alignment
+downloads its FAN weights (~90 MB, adrianbulat.com) into the torch hub cache
+on first use.
 
-Make sure your pip version is up-to-date:
-```
-pip install -U pip
-```
+Python is 3.10; `fitting/py310_compat.py` backports `enum.StrEnum` /
+`typing.Self`, which gnm-shape uses. psbody-mesh is optional:
+`fitting/mesh_io.py` uses it if installed and otherwise falls back to trimesh
+(reads .obj and .ply).
 
-Some requirements can be installed using:
-```
-pip install -r requirements.txt
-```
+## Run
 
-Install mesh processing libraries from [MPI-IS/mesh](https://github.com/MPI-IS/mesh) within the virtual environment.
-
-The scan-to-mesh distance used for fitting a scan depends on Eigen. Either download Eigen from [here](http://eigen.tuxfamily.org/index.php?title=Main_Page) OR clone the repository:
-```
-git clone https://gitlab.com/libeigen/eigen.git
-```
-After downloading Eigen, you need to compile the code in the directory 'sbody/alignment/mesh_distance'. To do this go to the directory:
-```
-cd sbody/alignment/mesh_distance
-```
-Edit the file setup.py to set EIGEN_DIR to the location of Eigen. Then type:
-```
-make
+```bash
+uv run python run_gnm_pipeline.py -i /path/to/scan_folder -o /path/to/out --device cuda
 ```
 
-### Data
+The scan folder must contain `model.obj` (in metres -- or pass `--scan_unit`),
+`calibration.xml` (Agisoft Metashape camera export) and `views/` (photos
+named after the camera labels).
 
-To download the FLAME model, sign up and agree to the model license under [MPI-IS/FLAME](https://flame.is.tue.mpg.de/downloads). Then run following script: 
-```
-./fetch_FLAME.sh
-```
+### From a 2DGS / 3DGS reconstruction
 
-### Demo
+`tools/twodgs_to_scan_folder.py` builds that folder from a 2DGS run: the fused
+`.ply`, the `cameras.json` export (camera->world rotation + centre, OpenCV
+axes, PINHOLE), and the undistorted images 2DGS trained on. SfM scenes have
+arbitrary scale, so give `--scale` in metres per scene unit; the fit
+re-estimates scale itself, but `fit_eval`'s thresholds and reported mm assume a
+roughly metric scan (a good `--scale` makes the fit's printed Umeyama scale
+come out near 1.0).
 
- * Load and evaluate FLAME model: `hello_world.py`
- * Fit FLAME to 3D landmarks (CPU, chumpy): `fit_lmk3d.py`
- * Fit FLAME to a 3D scan (CPU, chumpy): `fit_scan.py`
- * Fit FLAME to a 3D scan (GPU, PyTorch, takes `--scan`/`--landmarks`/`--output_dir`): `fit_scan_torch.py`
- * Fit GNM to a 3D scan (GPU, PyTorch, same CLI as above): `fit_scan_gnm.py`
-
-Fitting a scan requires scan and FLAME model to be in the same local coordiante systems. The `fit_scan.py` script provides different options by specifying the variable `scale_unit` to convert from Meters [m] (default), Centimeters [cm], or Milimieters [mm]. Please specify the right unit when running `fit_scan.py`. If the unit of the measurement unit is unknown, choose `scale_unit = 'NA'`. `fit_scan_torch.py`/`fit_scan_gnm.py` take the equivalent `--scan_unit` flag instead of a hardcoded variable.
-
-See **[FITTING.md](FITTING.md)** for a full end-to-end walkthrough, including how to generate the 3D landmarks a scan-fitting script needs from your own scan.
-
-### Landmarks
-
-<p align="center"> 
-<img src="data/landmarks_51_annotated.png" width="50%">
-</p>
-
-The provided demos fit FLAME to 3D landmarks or to a scan, using 3D landmarks for initialization and during fitting. Both demos use the shown 51 landmarks. Providing the landmarks in the exact order is essential. The landmarks can for instance be obtained with [MeshLab](https://www.meshlab.net/) using the PickPoints module. PickPoints outputs a .pp file containing the selected points. The .pp file can be loaded with the provided 'load_picked_points(fname)' function in fitting/landmarks.py.
- 
-### Citing
-
-When using this code in a scientific publication, please cite FLAME 
-```
-@article{FLAME:SiggraphAsia2017,
-  title = {Learning a model of facial shape and expression from {4D} scans},
-  author = {Li, Tianye and Bolkart, Timo and Black, Michael. J. and Li, Hao and Romero, Javier},
-  journal = {ACM Transactions on Graphics, (Proc. SIGGRAPH Asia)},
-  volume = {36},
-  number = {6},
-  year = {2017},
-  url = {https://doi.org/10.1145/3130800.3130813}
-}
+```bash
+uv run python tools/twodgs_to_scan_folder.py --ply fuse_post_strict_colored.ply \
+    --cameras cameras.json --images <2dgs source>/images --scale 0.0563 --out scan_folder
 ```
 
-### License
+## Known issues
 
-The FLAME model is under a Creative Commons Attribution license. By using this code, you acknowledge that you have read the terms and conditions (https://flame.is.tue.mpg.de/modellicense.html), understand them, and agree to be bound by them. If you do not agree with these terms and conditions, you must not use the code. You further agree to cite the FLAME paper when reporting results with this model.
-
-### Supported projects
-
-Visit the [FLAME-Universe](https://github.com/TimoBolkart/FLAME-Universe) for an overview of FLAME-based projects. 
-
-FLAME supports several projects such as
-* [CoMA: Convolutional Mesh Autoencoders](https://github.com/anuragranj/coma)
-* [RingNet: 3D Face Shape and Expression Reconstruction from an Image without 3D Supervision](https://github.com/soubhiksanyal/RingNet)
-* [VOCA: Voice Operated Character Animation](https://github.com/TimoBolkart/voca)
-* [Expressive Body Capture: 3D Hands, Face, and Body from a Single Image](https://github.com/vchoutas/smplify-x)
-* [ExPose: Monocular Expressive Body Regression through Body-Driven Attention](https://github.com/vchoutas/expose)
-* [GIF: Generative Interpretable Faces](https://github.com/ParthaEth/GIF)
-* [DECA: Detailed Expression Capture and Animation](https://github.com/YadiraF/DECA)
-
-FLAME is part of [SMPL-X: : A new joint 3D model of the human body, face and hands together](https://github.com/vchoutas/smplx).
-
-### Acknowledgement
-
-Code in `smpl_webuser` originates from [SMPL Python code](http://smpl.is.tue.mpg.de/), and code in `sbody` originates from [SMALR](https://github.com/silviazuffi/smalr_online). We thank the authors for pushing these code packages. 
+- `fit_eval.visible_non_skin_rays()` (the teeth-through-lips check) casts rays
+  along -z, i.e. assumes the mesh faces +z, but `evaluate_fit` hands it the fit
+  in the scan's frame. Unless the scan frame faces +z the check is not
+  meaningful (on a 2DGS scan it reported 0 eyeball rays vs 543 on the
+  template).
+- Landmark-Umeyama scale moves by ~5% depending on which landmarks are used.
+- Hair, headbands and clothing are fitted where they sit within the
+  correspondence gate: the cranium and neck can still be pulled outward.

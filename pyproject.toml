@@ -1,40 +1,44 @@
 [project]
-name = "flame-fitting"
-version = "0.1.0"
-description = "Add your description here"
+name = "gnm-fitting"
+version = "0.2.0"
+description = "Fit Google's GNM head model to a 3D scan + 68-point landmarks (Windows/Linux, uv)."
 readme = "README.md"
-# chumpy uses inspect.getargspec, removed in 3.11 -> hard upper bound
 requires-python = ">=3.10,<3.11"
 dependencies = [
+    # Held at 1.23: the lock (and dlib-bin/open3d/face-alignment builds in it)
+    # was resolved and tested against it. Revisit before bumping.
     "numpy>=1.23,<1.24",
-    "chumpy==0.70",
-    "opencv-python>=4.10,<4.11",
-    "werkzeug>=3.0,<4",
-    # Locally-built wheel (see [tool.uv.sources]) -- not on PyPI.
-    "psbody-mesh==0.4",
     # Pinned to +cu128 builds (see [tool.uv.sources]/[[tool.uv.index]] below) --
     # the default PyPI wheels ship CUDA 12.6 kernels, which don't include
-    # sm_120 (Blackwell / RTX 50-series), so torch.cuda would report
-    # "no kernel image is available for execution on the device".
+    # sm_120 (Blackwell / RTX 50-series).
     "torch==2.7.1",
     "torchvision==0.22.1",
-    "torchaudio==2.7.1",
+    # GNM itself (sibling checkout of github.com/google/gnm, see [tool.uv.sources]).
     "gnm-shape[pytorch]",
+    "typing-extensions",          # fitting/py310_compat.py (typing.Self on 3.10)
+    # fit_scan_gnm.py / fit_eval.py
+    "open3d>=0.20.0",
+    "scipy",
+    "matplotlib>=3.10.9",
+    "trimesh",                    # fitting/mesh_io.py, tools/
+    # scan_landmarks/generate_scan_landmarks.py
+    "opencv-python>=4.10,<4.11",
+    "beautifulsoup4>=4.15.0",
+    "lxml>=6.1.3",                # bs4's "xml" parser for calibration.xml
+    "pillow>=12.3.0",
+    "dlib-bin>=20.0.1.post1",     # prebuilt dlib (Windows + Linux), imports as `dlib`
+    "face-alignment>=1.5.0",
+    "face-recognition-models>=0.3.0",  # ships shape_predictor_68_face_landmarks.dat
 ]
 
-[dependency-groups]
-# Cython is only needed to compile extensions (psbody-mesh etc.), not at runtime.
-# Held below 3.0 because legacy .pyx sources break on Cython 3 defaults.
-build = [
-    "cython>=0.29.37,<3.0",
-    "setuptools>=61",
-    "numpy>=1.23,<1.24",
-]
-
-# flame-fitting is a script repo, not an installable library: no build-system table
-# and package = false, so uv manages the env without trying to build the project.
+# Script repo, not an installable library.
 [tool.uv]
 package = false
+# Lock must resolve for both dev machines (Linux + Windows).
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -44,12 +48,4 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]
-torchaudio = [{ index = "pytorch-cu128" }]
-psbody-mesh = { path = "/home/linuxmsi/wheels/psbody_mesh-0.4-cp310-cp310-linux_x86_64.whl" }
 gnm-shape = { path = "../GNM/gnm/shape", editable = true }
-
-# chumpy ships an sdist with no pyproject.toml (legacy setuptools backend) and its
-# setup.py imports pip to parse its own requirements.txt. Neither is present in
-# uv's isolated build env by default, so inject them here.
-[tool.uv.extra-build-dependencies]
-chumpy = ["setuptools", "wheel", "pip"]
