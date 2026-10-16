@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lid &amp; lip-line annotation</title>
+<style>
+  :root { --bg:#16181c; --panel:#1f2228; --line:#30343c; --text:#e6e6e6; --muted:#9aa0aa; --accent:#4da3ff;
+          --up:#00e5ff; --lo:#ffd400; --cor:#ff4fd8; --lip:#ff8a3d; --ok:#3ccf6e; --warn:#ffb020; --bad:#ff5c5c; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font:13px/1.35 system-ui,Segoe UI,Arial,sans-serif; }
+  #app { display:grid; grid-template-columns:210px 1fr 300px; height:100vh; }
+  #views, #side { background:var(--panel); overflow:auto; border-right:1px solid var(--line); }
+  #side { border-right:0; border-left:1px solid var(--line); padding:10px; }
+  #views h3, #side h3 { margin:10px 10px 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .vrow { padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:6px; }
+  .vrow:hover { background:#262a31; }
+  .vrow.sel { background:#2b3442; }
+  .tag { font-size:10px; padding:1px 5px; border-radius:8px; background:#3a4150; color:#cfd6e2; }
+  .tag.ho { background:#5a3d8a; }
+  .prog { font-size:11px; color:var(--muted); }
+  #main { position:relative; overflow:hidden; }
+  #cv { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; }
+  #toolbar { position:absolute; left:8px; top:8px; display:flex; gap:6px; flex-wrap:wrap; z-index:2; }
+  button { background:#2a2f37; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 9px; cursor:pointer; font:inherit; }
+  button:hover { background:#343a44; }
+  button.on { background:#2f4f7a; border-color:#4d78b3; }
+  #hud { position:absolute; left:8px; bottom:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:6px; font-size:12px; z-index:2; }
+  .sec { border:1px solid var(--line); border-radius:8px; padding:7px; margin-bottom:7px; cursor:pointer; }
+  .sec.act { border-color:var(--accent); background:#232c38; }
+  .sec .nm { display:flex; justify-content:space-between; align-items:center; font-weight:600; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle; }
+  .st { font-size:11px; padding:1px 6px; border-radius:8px; }
+  .st.valid { background:#1f5133; color:#bff0cf; } .st.unclear { background:#5a4510; color:#ffe2a3; }
+  .st.occluded { background:#5a1f1f; color:#ffc2c2; } .st.todo { background:#333; color:#bbb; }
+  .sec .btns { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
+  .sec .btns button { padding:2px 7px; font-size:11px; }
+  .sec input { width:100%; margin-top:5px; background:#15171b; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:3px 6px; font:inherit; font-size:11px; }
+  label.sl { display:block; font-size:11px; color:var(--muted); margin-top:6px; }
+  label.sl input { width:100%; }
+  .help { font-size:11px; color:var(--muted); }
+  .help b { color:var(--text); font-weight:600; }
+  #saved { font-size:11px; color:var(--muted); margin:6px 0; min-height:14px; }
+  hr { border:0; border-top:1px solid var(--line); margin:10px 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="views"><h3>Views (held-out first)</h3><div id="vlist"></div></div>
+  <div id="main">
+    <canvas id="cv"></canvas>
+    <div id="toolbar">
+      <button data-reg="eye_r">Subject's RIGHT eye (image left)</button>
+      <button data-reg="eye_l">Subject's LEFT eye (image right)</button>
+      <button data-reg="mouth">Mouth</button>
+      <button data-reg="full">Whole image</button>
+      <button id="pix">Pixelated: off</button>
+    </div>
+    <div id="hud"></div>
+  </div>
+  <div id="side">
+    <div><label class="sl">Annotator <input id="who" placeholder="your name"></label></div>
+    <div id="saved"></div>
+    <h3>Sections</h3>
+    <div id="secs"></div>
+    <hr>
+    <label class="sl">Brightness <input id="br" type="range" min="50" max="200" value="100"></label>
+    <label class="sl">Contrast <input id="ct" type="range" min="50" max="250" value="100"></label>
+    <label class="sl">Line width <input id="lw" type="range" min="1" max="4" value="1" step="0.5"></label>
+    <label class="sl"><input id="others" type="checkbox" checked> show the other sections</label>
+    <hr>
+    <div class="help">
+      <b>Click</b> adds a point to the active section, extending the line at whichever end is nearer (trace it corner to corner);
+      <b>Shift+click</b> inserts a point into the nearest segment. A corner keeps one point.
+      A few points per lid are enough (e.g. 5-9); the line between them is what gets scored.
+      <b>Drag</b> a point to move it. <b>Right-click</b> a point to delete it.
+      <b>Wheel</b> zooms at the cursor; <b>middle-drag</b> or <b>Space+drag</b> pans.
+      <b>1-5</b> select section, <b>U</b> unclear, <b>O</b> occluded, <b>Ctrl+Z</b> undo, <b>N/P</b> next/previous view.<br><br>
+      <b>Upper lid</b>: the visible edge where the upper lid margin (lash line) meets the eyeball.<br>
+      <b>Lower lid</b>: the visible edge where the lower lid margin meets the eyeball &mdash; the lid, not the bottom of the iris.<br>
+      <b>Corners</b>: where the upper and lower margins meet (inner = medial end of the opening).<br>
+      <b>Lip line</b>: where the upper and lower lips meet, commissure to commissure.<br>
+      Mark only what you can see. If part of a boundary is uncertain, either mark the visible part or flag the section
+      <b>Unclear</b> / <b>Occluded</b> &mdash; flagged sections are excluded from scoring. Everything saves automatically.
+      Coordinates are stored in original image pixels (origin at the top-left corner of the image).
+    </div>
+  </div>
+</div>
+<script>
+const SEC_INFO = {
+  'upper_lid': {label:'Upper lid margin', color:'--up', kind:'line'},
+  'lower_lid': {label:'Lower lid margin', color:'--lo', kind:'line'},
+  'outer_corner': {label:'Outer corner', color:'--cor', kind:'point'},
+  'inner_corner': {label:'Inner corner', color:'--cor', kind:'point'},
+  'lip_line': {label:'Lip line (where lips meet)', color:'--lip', kind:'line'},
+};
+const REG_SECS = { eye_r:['eye_r.upper_lid','eye_r.lower_lid','eye_r.outer_corner','eye_r.inner_corner'],
+                   eye_l:['eye_l.upper_lid','eye_l.lower_lid','eye_l.outer_corner','eye_l.inner_corner'],
+                   mouth:['mouth.lip_line'] };
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let VIEWS=[], SECTIONS=[], cur=null, img=null, region='eye_r', active=null;
+let ann={};            // view -> {sections:{k:{status,points,note}}}
+let undo=[];           // stack of JSON snapshots for current view
+let view={s:1, ox:0, oy:0}, drag=null, space=false, pixelated=false, hover=null;
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+
+function blank(){ const s={}; for(const k of SECTIONS) s[k]={status:'todo', points:[], note:''}; return {sections:s}; }
+function A(){ return ann[cur.name]; }
+function secKey(k){ return k.split('.')[1]; }
+
+async function load(){
+  const r=await fetch('/api/views'); const d=await r.json();
+  VIEWS=d.views; SECTIONS=d.sections;
+  for(const v of VIEWS){
+    const a=blank();
+    if(v.annotation){ for(const k of SECTIONS){ const s=v.annotation.sections[k]; if(s){
+      a.sections[k]={status:s.status, points:(s.status==='valid'?s.points:(s.draft_points||[])), note:s.note||''}; } }
+      document.getElementById('who').value = v.annotation.annotator || document.getElementById('who').value; }
+    ann[v.name]=a;
+  }
+  const who=localStorage.getItem('gnm_annot_who'); if(who) document.getElementById('who').value=who;
+  renderList(); select(VIEWS[0].name);
+}
+function progress(v){ const s=ann[v.name].sections; let ok=0, fl=0;
+  for(const k of SECTIONS){ if(s[k].status==='valid') ok++; else if(s[k].status!=='todo') fl++; }
+  return `${ok}✓ ${fl}⚑ / ${SECTIONS.length}`; }
+function renderList(){
+  const el=document.getElementById('vlist'); el.innerHTML='';
+  for(const v of VIEWS){
+    const d=document.createElement('div'); d.className='vrow'+(cur&&cur.name===v.name?' sel':'');
+    d.innerHTML=`<span>${v.name.replace('frame_','')} ${v.holdout?'<span class="tag ho">held-out</span>':''}</span><span class="prog">${progress(v)}</span>`;
+    d.onclick=()=>select(v.name); el.appendChild(d);
+  }
+}
+function select(name){
+  cur=VIEWS.find(v=>v.name===name); undo=[];
+  img=new Image(); img.onload=()=>{ setRegion(region); }; img.src='/img/'+encodeURIComponent(name);
+  renderList();
+}
+function setRegion(r){
+  region=r;
+  document.querySelectorAll('#toolbar button[data-reg]').forEach(b=>b.classList.toggle('on', b.dataset.reg===r));
+  const W=cv.clientWidth, H=cv.clientHeight; cv.width=W*devicePixelRatio; cv.height=H*devicePixelRatio;
+  let box=[0,0,img.width,img.height];
+  if(r!=='full' && cur.regions && cur.regions[r]) box=cur.regions[r];
+  const s=Math.min(W/(box[2]-box[0]), H/(box[3]-box[1]));
+  view.s=s; view.ox=W/2-s*(box[0]+box[2])/2; view.oy=H/2-s*(box[1]+box[3])/2;
+  if(r!=='full'){ const secs=REG_SECS[r]; if(!active || !secs.includes(active)) active=secs[0]; }
+  renderSecs(); draw();
+}
+function renderSecs(){
+  const el=document.getElementById('secs'); el.innerHTML='';
+  const list = region==='full' ? SECTIONS : REG_SECS[region];
+  list.forEach((k,i)=>{
+    const s=A().sections[k], info=SEC_INFO[secKey(k)];
+    const d=document.createElement('div'); d.className='sec'+(k===active?' act':'');
+    const where = k.startsWith('eye_r')?'R eye':k.startsWith('eye_l')?'L eye':'Mouth';
+    d.innerHTML=`<div class="nm"><span><span class="sw" style="background:${css(info.color)}"></span>${i+1}. ${where} · ${info.label}</span>
+      <span class="st ${s.status}">${s.status}</span></div>
+      <div class="prog">${s.points.length} point(s)</div>
+      <div class="btns"><button data-a="valid">Valid</button><button data-a="unclear">Unclear</button>
+      <button data-a="occluded">Occluded</button><button data-a="clear">Clear points</button></div>
+      <input placeholder="note (optional)" value="${(s.note||'').replace(/"/g,'&quot;')}">`;
+    d.onclick=e=>{ if(e.target.tagName==='BUTTON'||e.target.tagName==='INPUT') return; active=k; renderSecs(); draw(); };
+    d.querySelectorAll('button').forEach(b=>b.onclick=()=>{ snapshot(); const a=b.dataset.a;
+      if(a==='clear'){ s.points=[]; s.status='todo'; }
+      else if(a==='valid'){ const need=info.kind==='point'?1:2; s.status = s.points.length>=need?'valid':'todo';
+        if(s.status!=='valid') flash('add at least '+need+' point(s) first'); }
+      else s.status=a;
+      active=k; changed(); });
+    d.querySelector('input').onchange=e=>{ s.note=e.target.value; changed(false); };
+    el.appendChild(d);
+  });
+}
+function i2s(x,y){ return [view.ox+x*view.s, view.oy+y*view.s]; }
+function s2i(x,y){ return [(x-view.ox)/view.s, (y-view.oy)/view.s]; }
+function draw(){
+  const W=cv.clientWidth, H=cv.clientHeight; const dpr=devicePixelRatio;
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.fillStyle='#111'; ctx.fillRect(0,0,W,H);
+  if(!img||!img.complete) return;
+  ctx.imageSmoothingEnabled=!pixelated;
+  ctx.filter=`brightness(${document.getElementById('br').value}%) contrast(${document.getElementById('ct').value}%)`;
+  ctx.drawImage(img, view.ox, view.oy, img.width*view.s, img.height*view.s);
+  ctx.filter='none';
+  const lw=parseFloat(document.getElementById('lw').value), showO=document.getElementById('others').checked;
+  for(const k of SECTIONS){
+    if(k!==active && !showO) continue;
+    const s=A().sections[k], info=SEC_INFO[secKey(k)], col=css(info.color);
+    ctx.globalAlpha = k===active?1:0.55;
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=lw;
+    if(s.status!=='valid') ctx.setLineDash([4,4]); else ctx.setLineDash([]);
+    const P=s.points.map(p=>i2s(p[0],p[1]));
+    if(info.kind==='line' && P.length>1){ ctx.beginPath(); ctx.moveTo(P[0][0],P[0][1]); for(const p of P.slice(1)) ctx.lineTo(p[0],p[1]); ctx.stroke(); }
+    ctx.setLineDash([]);
+    for(const p of P){
+      if(info.kind==='point'){ ctx.beginPath(); ctx.moveTo(p[0]-7,p[1]); ctx.lineTo(p[0]+7,p[1]); ctx.moveTo(p[0],p[1]-7); ctx.lineTo(p[0],p[1]+7); ctx.stroke(); }
+      else { ctx.beginPath(); ctx.arc(p[0],p[1], k===active?3:2, 0, 7); ctx.stroke(); }
+    }
+  }
+  ctx.globalAlpha=1;
+  // preview: where the next click goes (line kinds, not while dragging / panning)
+  if(hover && active && SEC_INFO[secKey(active)].kind==='line' && !drag && !space){
+    const P=A().sections[active].points;
+    if(P.length){ const hi=s2i(hover[0],hover[1]);
+      const first=P[0], last=P[P.length-1];
+      const end = (P.length>=2 && Math.hypot(hi[0]-first[0],hi[1]-first[1])<Math.hypot(hi[0]-last[0],hi[1]-last[1]))?first:last;
+      const q=i2s(end[0],end[1]); ctx.setLineDash([2,3]); ctx.strokeStyle='#ffffff'; ctx.globalAlpha=0.5; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(q[0],q[1]); ctx.lineTo(hover[0],hover[1]); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1; }
+  }
+  const s=A().sections[active]||{};
+  document.getElementById('hud').textContent = `${cur.name}${cur.holdout?' (held-out)':''} · active: ${active} [${s.status}] · zoom ${view.s.toFixed(2)}x`;
+}
+function hit(sx,sy){ // nearest point of active section within 8 px
+  const s=A().sections[active]; let best=-1, bd=8;
+  s.points.forEach((p,i)=>{ const q=i2s(p[0],p[1]); const d=Math.hypot(q[0]-sx,q[1]-sy); if(d<bd){bd=d;best=i;} });
+  return best;
+}
+function snapshot(){ undo.push(JSON.stringify(A())); if(undo.length>200) undo.shift(); }
+let saveT=null;
+function changed(rerender=true){
+  const s=A().sections[active]; if(s && s.points.length>=(SEC_INFO[secKey(active)].kind==='point'?1:2) && s.status==='todo') s.status='valid';
+  if(s && s.points.length===0 && s.status==='valid') s.status='todo';
+  if(rerender){ renderSecs(); renderList(); } draw();
+  clearTimeout(saveT); saveT=setTimeout(save, 400);
+}
+async function save(){
+  const who=document.getElementById('who').value; try{ localStorage.setItem('gnm_annot_who', who); }catch(e){}
+  const r=await fetch('/api/save',{method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({view:cur.name, annotator:who, sections:A().sections})});
+  const d=await r.json();
+  document.getElementById('saved').textContent = d.saved ? `saved ${new Date().toLocaleTimeString()} → ${d.saved}` : ('save failed: '+JSON.stringify(d));
+}
+function flash(t){ document.getElementById('saved').textContent=t; }
+cv.addEventListener('contextmenu', e=>e.preventDefault());
+cv.addEventListener('mousedown', e=>{
+  const r=cv.getBoundingClientRect(), sx=e.clientX-r.left, sy=e.clientY-r.top;
+  if(e.button===1 || (e.button===0 && space)){ drag={pan:true, x:sx, y:sy, ox:view.ox, oy:view.oy}; return; }
+  if(!active) return;
+  const s=A().sections[active], info=SEC_INFO[secKey(active)];
+  const h=hit(sx,sy);
+  if(e.button===2){ if(h>=0){ snapshot(); s.points.splice(h,1); changed(); } return; }
+  if(e.button!==0) return;
+  snapshot();
+  if(h>=0){ drag={pt:h}; return; }
+  const p=s2i(sx,sy);
+  if(info.kind==='point') s.points=[p];
+  else {
+    const P=s.points;
+    if(e.shiftKey && P.length>=2){
+      // Shift+click: insert into the nearest segment (refine an existing line)
+      let bi=1, bc=Infinity;
+      for(let i=1;i<P.length;i++){ const a=P[i-1], b=P[i];
+        const c=Math.hypot(p[0]-a[0],p[1]-a[1])+Math.hypot(p[0]-b[0],p[1]-b[1])-Math.hypot(a[0]-b[0],a[1]-b[1]);
+        if(c<bc){bc=c;bi=i;} }
+      P.splice(bi,0,p);
+    } else if(P.length>=2 && Math.hypot(p[0]-P[0][0],p[1]-P[0][1]) < Math.hypot(p[0]-P[P.length-1][0],p[1]-P[P.length-1][1])){
+      P.unshift(p);           // click nearer the first point: extend at the start
+    } else P.push(p);         // otherwise extend at the end (trace corner to corner)
+  }
+  if(s.status!=='valid') s.status='todo';
+  drag={pt:(info.kind==='point'?0:s.points.indexOf(p))};
+  changed();
+});
+cv.addEventListener('mousemove', e=>{
+  const r=cv.getBoundingClientRect(), sx=e.clientX-r.left, sy=e.clientY-r.top;
+  if(!drag) { hover=[sx,sy]; draw(); return; }
+  if(drag.pan){ view.ox=drag.ox+sx-drag.x; view.oy=drag.oy+sy-drag.y; draw(); return; }
+  const s=A().sections[active]; s.points[drag.pt]=s2i(sx,sy); draw();
+});
+cv.addEventListener('mouseleave', ()=>{ hover=null; draw(); });
+window.addEventListener('mouseup', ()=>{ if(drag && !drag.pan) changed(); drag=null; });
+cv.addEventListener('wheel', e=>{ e.preventDefault(); const r=cv.getBoundingClientRect(), sx=e.clientX-r.left, sy=e.clientY-r.top;
+  const f=Math.exp(-e.deltaY*0.0015); const p=s2i(sx,sy); view.s*=f; view.ox=sx-p[0]*view.s; view.oy=sy-p[1]*view.s; draw(); }, {passive:false});
+window.addEventListener('keydown', e=>{
+  if(e.target.tagName==='INPUT') return;
+  if(e.code==='Space'){ space=true; e.preventDefault(); }
+  const list = region==='full'?SECTIONS:REG_SECS[region];
+  if(/^[1-9]$/.test(e.key) && list[+e.key-1]){ active=list[+e.key-1]; renderSecs(); draw(); }
+  if(e.key==='u'||e.key==='o'){ snapshot(); A().sections[active].status = e.key==='u'?'unclear':'occluded'; changed(); }
+  if((e.ctrlKey||e.metaKey) && e.key==='z'){ if(undo.length){ ann[cur.name]=JSON.parse(undo.pop()); changed(); } }
+  if(e.key==='n'||e.key==='p'){ const i=VIEWS.findIndex(v=>v.name===cur.name); const j=(i+(e.key==='n'?1:-1)+VIEWS.length)%VIEWS.length; select(VIEWS[j].name); }
+});
+window.addEventListener('keyup', e=>{ if(e.code==='Space') space=false; });
+window.addEventListener('resize', ()=>setRegion(region));
+document.querySelectorAll('#toolbar button[data-reg]').forEach(b=>b.onclick=()=>setRegion(b.dataset.reg));
+document.getElementById('pix').onclick=e=>{ pixelated=!pixelated; e.target.textContent='Pixelated: '+(pixelated?'on':'off'); draw(); };
+['br','ct','lw','others'].forEach(id=>document.getElementById(id).addEventListener('input', draw));
+load();
+</script>
+</body>
+</html>

@@ -226,6 +226,76 @@ def visible_non_skin_rays(vertices, triangles, grid=600):
     return {int(c): int((comp == c).sum()) for c in np.unique(comp) if c != skin}
 
 
+def gnm_npz_path():
+    ''' The GNM v3 head npz that gnm-shape loads from. Its vertex groups (teeth,
+    eyes, ears, lips...) are not exposed on the torch model object. '''
+    from gnm.shape import gnm_pytorch as gp
+    root = os.path.dirname(os.path.abspath(gp.__file__))
+    return os.path.join(root, 'data', 'versions', 'v3_0', 'gnm_head.npz')
+
+
+# Regions the new-intersection count is broken down by (GNM vertex groups).
+INTERSECTION_REGIONS = ('ears', 'upper_lip_region', 'lower_lip_region', 'mouth_sock',
+                        'left_orbital_region', 'right_orbital_region', 'nose_region')
+
+
+def _self_intersecting_pairs(vertices, triangles):
+    mesh = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(np.asarray(vertices, dtype=np.float64)),
+        o3d.utility.Vector3iVector(np.asarray(triangles, dtype=np.int32)))
+    p = np.asarray(mesh.get_self_intersecting_triangles()).reshape(-1, 2)
+    return np.sort(p, axis=1)
+
+
+def new_intersections(fit_v, template_v, triangles):
+    ''' Triangle pairs that intersect in the fit but NOT in the neutral
+    template, split by which components meet (skin/teeth/tongue/eye) and, for
+    anything touching skin, by face region.
+
+    Exact triangle-triangle tests, independent of the collision term in
+    fitting/collision.py, so it is a fair check on it. Relative to the
+    template because the template itself intersects by design: gums are
+    embedded in the mouth sock, eyeballs in the sockets, and the lips overlap
+    slightly where they meet. Same topology, so any frame works. '''
+    from fitting.collision import component_kinds
+    triangles = np.asarray(triangles)
+    fit_p = _self_intersecting_pairs(fit_v, triangles)
+    tpl_p = _self_intersecting_pairs(template_v, triangles)
+    key = lambda p: p[:, 0].astype(np.int64) * len(triangles) + p[:, 1]
+    new = fit_p[~np.isin(key(fit_p), key(tpl_p))]
+
+    d = np.load(gnm_npz_path())
+    names = list(d['vertex_group_names'])
+    kind = component_kinds(np.zeros((d["vertex_groups"].shape[1], 3)),
+                           triangles, d['vertex_groups'], names)
+    tk = kind[triangles[:, 0]]
+    by_kind = {}
+    for a, b in new:
+        k = '%s-%s' % tuple(sorted((tk[a], tk[b])))
+        by_kind[k] = by_kind.get(k, 0) + 1
+    by_region = {}
+    for r in INTERSECTION_REGIONS:
+        g = d['vertex_groups'][names.index(r)] > 0.5
+        hit = g[triangles[new]].reshape(len(new), -1).any(axis=1) if len(new) else np.zeros(0, bool)
+        by_region[r] = int(hit.sum())
+    # Triangle-level count as well: a triangle that already intersected
+    # something in the template (gums in the mouth sock, eyeballs in the
+    # sockets, the lip seal) produces new PAIRS whenever it slides at all, which
+    # is noise; a triangle that was clean in the template and now intersects is
+    # a real new collision.
+    tpl_tris = np.unique(tpl_p)
+    new_tris = np.setdiff1d(np.unique(fit_p), tpl_tris)
+    tris_by_kind = {k: int((tk[new_tris] == k).sum()) for k in np.unique(tk)}
+    tris_by_region = {}
+    for r in INTERSECTION_REGIONS:
+        g = d['vertex_groups'][names.index(r)] > 0.5
+        tris_by_region[r] = int(g[triangles[new_tris]].any(axis=1).sum())
+    return dict(total=int(len(new)), template_total=int(len(tpl_p)),
+                by_components=by_kind, by_region=by_region,
+                new_triangles=int(len(new_tris)), new_triangles_by_kind=tris_by_kind,
+                new_triangles_by_region=tris_by_region)
+
+
 def gnm_measurable_mask(gnm):
     ''' (V,) bool over GNM's template: surface a scan can meaningfully be
     compared against. Depends only on the template, so it is computed once and
@@ -304,10 +374,15 @@ def write_error_heatmap(path, vertices, triangles, distances_m, mask=None,
 # -----------------------------------------------------------------------------
 
 def evaluate_fit(scan_v, scan_f, fit_v, fit_f, gnm, output_dir, label='fit',
-                  write_heatmaps=True, quiet=False):
+                  write_heatmaps=True, quiet=False, fit_v_model=None):
     ''' Measures fit_v against scan_v, prints the report, writes
     <label>_error.json and the two heatmap PLYs. Both meshes must already be in
-    the SAME coordinate frame and in metres. '''
+    the SAME coordinate frame and in metres.
+
+    fit_v_model is the same fit in GNM's canonical frame (facing +z), used for
+    the front-view breach check, which casts rays along -z and so is
+    meaningless on a fit in an arbitrary scan frame. Without it the check runs
+    on fit_v as before, and is only right if the scan happens to face +z. '''
     os.makedirs(output_dir, exist_ok=True)
     scan_v = np.asarray(scan_v, dtype=np.float64)
     fit_v = np.asarray(fit_v, dtype=np.float64)
@@ -349,7 +424,7 @@ def evaluate_fit(scan_v, scan_f, fit_v, fit_f, gnm, output_dir, label='fit',
     # the template's own count, because the template legitimately shows eyeball.
     template_v = gnm.template_vertex_positions.detach().cpu().numpy().astype(np.float64)
     template_f = gnm.triangles.detach().cpu().numpy()
-    shown = visible_non_skin_rays(fit_v, fit_f)
+    shown = visible_non_skin_rays(fit_v if fit_v_model is None else fit_v_model, fit_f)
     shown_template = visible_non_skin_rays(template_v, template_f)
     # A component the template never shows and the fit does is unambiguous: the
     # skin has been pushed back through it. Eyeball, which the template does
@@ -371,9 +446,23 @@ def evaluate_fit(scan_v, scan_f, fit_v, fit_f, gnm, output_dir, label='fit',
                   'table above CANNOT see this and will score it as an improvement, because '
                   'matching the scan more tightly is exactly what causes it.' % len(breaches))
 
+    inter = new_intersections(fit_v, template_v, fit_f)
+    if not quiet:
+        print('\nnew self-intersections vs the neutral template (triangle pairs): %d'
+              % inter['total'])
+        print('    by components: %s' % (', '.join(
+            '%s %d' % kv for kv in sorted(inter['by_components'].items())) or 'none'))
+        print('    by region:     %s' % (', '.join(
+            '%s %d' % kv for kv in inter['by_region'].items() if kv[1]) or 'none'))
+        print('previously-clean triangles that now intersect: %d' % inter['new_triangles'])
+        print('    by part:   %s' % (', '.join(
+            '%s %d' % kv for kv in inter['new_triangles_by_kind'].items() if kv[1]) or 'none'))
+        print('    by region: %s' % (', '.join(
+            '%s %d' % kv for kv in inter['new_triangles_by_region'].items() if kv[1]) or 'none'))
+
     summary = dict(label=label, rows={name: s for name, s in rows},
                     non_skin_visible_rays=shown, non_skin_visible_rays_template=shown_template,
-                    non_skin_breaches=breaches)
+                    non_skin_breaches=breaches, new_self_intersections=inter)
     with open(os.path.join(output_dir, '%s_error.json' % label), 'w') as f:
         json.dump(summary, f, indent=2)
 

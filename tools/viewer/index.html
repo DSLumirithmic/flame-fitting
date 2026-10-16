@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GNM Comparison Viewer</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js", "three/addons/": "./vendor/" } }
+</script>
+</head>
+<body>
+<aside id="side">
+  <h1>GNM comparison</h1>
+  <div id="runinfo" class="muted"></div>
+
+  <section>
+    <h2>Camera</h2>
+    <label>View <select id="view"></select></label>
+    <div class="row">
+      <label><input type="radio" name="cammode" value="calib" checked> Calibrated</label>
+      <label><input type="radio" name="cammode" value="free"> Free orbit</label>
+    </div>
+    <label class="free-only"><input type="checkbox" id="linkcams" checked> Link scan / GNM orbit + zoom</label>
+    <div id="viewinfo" class="muted small"></div>
+    <div class="small muted">Calibrated: wheel = zoom, drag = pan, double-click = reset. ←/→ change view.</div>
+  </section>
+
+  <section>
+    <h2>Layout</h2>
+    <div class="row">
+      <label><input type="radio" name="layout" value="sbs" checked> Side by side</label>
+      <label><input type="radio" name="layout" value="overlay"> Overlay</label>
+    </div>
+    <div id="sbsopts" class="row">
+      <label><input type="checkbox" id="col_photo" checked> Photo</label>
+      <label><input type="checkbox" id="col_scan" checked> Scan</label>
+      <label><input type="checkbox" id="col_gnm" checked> GNM</label>
+    </div>
+    <div id="ovopts">
+      <label class="slider">Photo <input type="range" id="op_photo" min="0" max="1" step="0.01" value="1"><span></span></label>
+      <label class="slider">Scan <input type="range" id="op_scan" min="0" max="1" step="0.01" value="0"><span></span></label>
+      <label class="slider">GNM <input type="range" id="op_gnm" min="0" max="1" step="0.01" value="0.5"><span></span></label>
+      <div class="small muted">Stacked bottom → top: photo, scan, GNM.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>GNM</h2>
+    <label>Pose <select id="pose"></select></label>
+    <label>Display <select id="gnm_mode">
+      <option value="tex">Texture (unlit, as projected)</option>
+      <option value="texshade">Texture + shading</option>
+      <option value="smooth">Smooth shading</option>
+      <option value="flat">Flat shading</option>
+      <option value="normals">Normals</option>
+      <option value="error">Surface error vs scan</option>
+      <option value="source">Texture source view</option>
+      <option value="confidence">Texture confidence</option>
+    </select></label>
+    <label><input type="checkbox" id="gnm_wire"> Wireframe</label>
+  </section>
+
+  <section>
+    <h2>Scan</h2>
+    <label>Display <select id="scan_mode">
+      <option value="smooth">Smooth shading</option>
+      <option value="flat">Flat shading</option>
+      <option value="normals">Normals</option>
+      <option value="error">Surface error vs GNM</option>
+    </select></label>
+    <label><input type="checkbox" id="scan_wire"> Wireframe</label>
+    <label class="slider">Error ±mm <input type="range" id="err_range" min="0.5" max="10" step="0.5" value="3"><span></span></label>
+    <label class="slider">Grey beyond mm <input type="range" id="err_out" min="5" max="50" step="1" value="15"><span></span></label>
+  </section>
+
+  <section>
+    <h2>Overlays <span class="small muted">(calibrated view)</span></h2>
+    <div class="grid2">
+      <label><input type="checkbox" id="ov_det" checked> Detected landmarks</label>
+      <label><input type="checkbox" id="ov_gnm" checked> GNM landmarks</label>
+      <label><input type="checkbox" id="ov_res" checked> Reprojection lines</label>
+      <label><input type="checkbox" id="ov_jaw"> Jaw contour</label>
+      <label><input type="checkbox" id="ov_silp"> Silhouette: photo</label>
+      <label><input type="checkbox" id="ov_sils"> Silhouette: scan</label>
+      <label><input type="checkbox" id="ov_silg"> Silhouette: GNM</label>
+      <label><input type="checkbox" id="ov_all" checked> On every panel</label>
+    </div>
+  </section>
+
+  <section>
+    <h2>Inspect</h2>
+    <div id="regions" class="btns"></div>
+    <button id="resetzoom">Reset zoom</button>
+  </section>
+
+  <section>
+    <h2>Export</h2>
+    <label>Scale <select id="shot_scale"><option value="1">1×</option><option value="2" selected>2×</option><option value="3">3×</option></select></label>
+    <button id="shot" class="primary">Save screenshot</button>
+    <div id="shotmsg" class="small muted"></div>
+  </section>
+
+  <section id="legend"></section>
+</aside>
+<main id="main"><div id="panels"></div><div id="status">loading…</div></main>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

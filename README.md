@@ -52,6 +52,38 @@ The scan folder must contain `model.obj` (in metres -- or pass `--scan_unit`),
 `calibration.xml` (Agisoft Metashape camera export) and `views/` (photos
 named after the camera labels).
 
+### V2 (recommended identity fit; opt-in, V1 defaults unchanged)
+
+```bash
+# 1. landmarks + per-view observations, holding some views out for evaluation
+uv run python scan_landmarks/generate_scan_landmarks.py -i <scan_folder> --gnm -o <out>/landmarks \
+    --holdout-views frame_000332,frame_000496,frame_001152
+# 2. fit: 2D landmarks + jaw contour + scan confidence (+ animation-aware collisions)
+uv run python fit_scan_gnm.py --scan <scan_folder>/model.obj --landmarks <out>/landmarks/landmarks.npy \
+    --observations <out>/landmarks/observations.npz --output_dir <out>/fit --label fit \
+    --stage2_iters 1600 --polish_rounds 24 --lmk2d_weight 0.05 --contour_weight 0.05 \
+    --scan_confidence --anim_collision_weight 10
+# 3. evaluate (2D train/held-out, regional error, identity-only, collisions) and animate
+uv run python tools/eval_v2.py --run <out>/fit --scan <scan_folder>/model.obj \
+    --observations <out>/landmarks/observations.npz
+uv run python tools/validate_animation.py --identity <out>/fit/identity --out <out>/fit/eval_v2/anim --torch_check
+```
+
+Texture and comparison viewer (FITTING_README "Calibrated multi-view texture" / "Comparison viewer"):
+
+```bash
+uv run python tools/bake_texture.py --run <out>/fit --scan_folder <scan_folder> \
+    --observations <out>/landmarks/observations.npz --out <out>/fit/texture
+uv run python tools/render_texture.py --texture_dir <out>/fit/texture --scan_folder <scan_folder>
+uv run python tools/viewer/build_viewer_data.py --run <out>/fit --scan_folder <scan_folder> \
+    --observations <out>/landmarks/observations.npz
+uv run python tools/viewer/serve.py --data <out>/fit/viewer_data
+```
+
+The persistent identity is `<out>/fit/identity/` (see FITTING_README "V2" for
+the format and `tools/animate_identity.py` for driving it with new
+expression/pose estimates).
+
 ### From a 2DGS / 3DGS reconstruction
 
 `tools/twodgs_to_scan_folder.py` builds that folder from a 2DGS run: the fused
@@ -69,11 +101,18 @@ uv run python tools/twodgs_to_scan_folder.py --ply fuse_post_strict_colored.ply 
 
 ## Known issues
 
-- `fit_eval.visible_non_skin_rays()` (the teeth-through-lips check) casts rays
-  along -z, i.e. assumes the mesh faces +z, but `evaluate_fit` hands it the fit
-  in the scan's frame. Unless the scan frame faces +z the check is not
-  meaningful (on a 2DGS scan it reported 0 eyeball rays vs 543 on the
-  template).
+- Fixed: the teeth-through-lips ray check now runs on the fit in GNM's
+  model frame (faces +z), not the scan frame.
+- The V1 collision term (`fitting/collision.py`, see FITTING_README) is built
+  from pairs that are close in the NEUTRAL template and is evaluated at the
+  capture pose only. V2's `--anim_collision_weight` adds pairs rebuilt on the
+  template in suite expressions; the neutral pairs flag hundreds of false
+  "penetrations" on GNM's own template in blink / jaw open / pucker, so they
+  must not be used to validate animated poses.
+- No ear landmarks: the 68-point iBUG detector has none. Ears are shaped by
+  the scan term (down-weighted in V2) and the fold collision pairs only.
+- FAN's per-landmark score is saturated at 1.0 on the run_3 photos, so it is
+  not used as a confidence.
 - Landmark-Umeyama scale moves by ~5% depending on which landmarks are used.
 - Hair, headbands and clothing are fitted where they sit within the
   correspondence gate: the cranium and neck can still be pulled outward.

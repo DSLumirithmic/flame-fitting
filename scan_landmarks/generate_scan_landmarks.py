@@ -79,6 +79,28 @@ def set_landmark_convention(name):
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp")
 
+# 2D detector (--detector). "dlib_fan" is the original pipeline and the default:
+# dlib sources iBUG 0..NUM_DLIB_LANDMARKS_USED-1, FAN the rest, with FAN run on
+# dlib's face box. The single-detector options never mix points from two
+# detectors within one observation set:
+#   "fan"      FAN for all 68 points, on the face box of FAN's own SFD detector
+#   "dlib"     dlib's 68-point shape predictor for all 68 points
+#   "external" precomputed per-view 68-point detections from --detections
+#              (e.g. scan_landmarks/detect_mediapipe.py), already mapped to iBUG-68
+DETECTORS = ("dlib_fan", "fan", "dlib", "external")
+DETECTOR = "dlib_fan"
+EXTERNAL_DETECTIONS = None   # dict loaded from --detections when DETECTOR == "external"
+
+
+def landmark_sources():
+    """Per-landmark source tag stored in observations.npz. fitting/observations.py
+    applies dlib's face-score gating/weighting to points tagged "dlib"."""
+    if DETECTOR == "dlib_fan":
+        return np.array(["dlib" if k < NUM_DLIB_LANDMARKS_USED else "fan" for k in range(NUM_LANDMARKS)])
+    if DETECTOR == "external":
+        return np.array([str(EXTERNAL_DETECTIONS["source"])] * NUM_LANDMARKS)
+    return np.array([DETECTOR] * NUM_LANDMARKS)
+
 # FAN's per-point landmark scores are heatmap-peak values, not calibrated
 # probabilities; empirically ~0.05-0.45 for confident points on real capture-rig
 # photos (see investigation notes). Rescales them to be roughly comparable to
@@ -555,8 +577,13 @@ def detect_landmarks_fan(image_rgb, fan_model, hint_bbox=None):
         # reliable as the dlib-hinted path above.
         areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in bboxes]
         best = int(np.argmax([a * b[4] for a, b in zip(areas, bboxes)]))
-        print("[WARN] FAN falling back to its own face detector (no dlib box for this view) -- "
-              "eyes/mouth landmarks are less reliable than usual for this view.")
+        if DETECTOR == "dlib_fan":
+            print("[WARN] FAN falling back to its own face detector (no dlib box for this view) -- "
+                  "eyes/mouth landmarks are less reliable than usual for this view.")
+        elif len(bboxes) > 1:
+            print("[INFO] FAN-only: SFD returned %d boxes, using the largest area*score one "
+                  "(%s)" % (len(bboxes), ", ".join("%.0fx%.0f@%.2f" % (b[2] - b[0], b[3] - b[1], b[4])
+                                                   for b in bboxes)))
 
     pts_68 = landmarks_list[best].astype(np.float64)
     raw_scores = scores_list[best]
@@ -582,12 +609,23 @@ def detect_landmarks(image_rgb, dlib_detector, dlib_predictor, fan_model):
         valid: (NUM_LANDMARKS,) bool
         confidence: (NUM_LANDMARKS,) float, roughly comparable across both sources
     """
-    dlib_pts, dlib_conf, dlib_bbox = detect_landmarks_dlib(image_rgb, dlib_detector, dlib_predictor)
-    fan_pts, fan_conf = detect_landmarks_fan(image_rgb, fan_model, hint_bbox=dlib_bbox)
-
     landmarks_2d = np.zeros((NUM_LANDMARKS, 2), dtype=np.float64)
     valid = np.zeros(NUM_LANDMARKS, dtype=bool)
     confidence = np.zeros(NUM_LANDMARKS, dtype=np.float64)
+
+    if DETECTOR == "dlib":
+        dlib_pts, dlib_conf, _ = detect_landmarks_dlib(image_rgb, dlib_detector, dlib_predictor)
+        if dlib_pts is not None:
+            landmarks_2d[:], valid[:], confidence[:] = dlib_pts, True, dlib_conf
+        return landmarks_2d, valid, confidence
+    if DETECTOR == "fan":
+        fan_pts, fan_conf = detect_landmarks_fan(image_rgb, fan_model, hint_bbox=None)
+        if fan_pts is not None:
+            landmarks_2d[:], valid[:], confidence[:] = fan_pts, True, fan_conf
+        return landmarks_2d, valid, confidence
+
+    dlib_pts, dlib_conf, dlib_bbox = detect_landmarks_dlib(image_rgb, dlib_detector, dlib_predictor)
+    fan_pts, fan_conf = detect_landmarks_fan(image_rgb, fan_model, hint_bbox=dlib_bbox)
 
     if dlib_pts is not None:
         landmarks_2d[:NUM_DLIB_LANDMARKS_USED] = dlib_pts[:NUM_DLIB_LANDMARKS_USED]
@@ -662,7 +700,9 @@ def _detect_one_view(args):
     releases the GIL around the actual compute, and empirically fine to share
     across threads -- only dlib corrupted results when shared)."""
     cam, facial_detector_path, fan_model = args
-    dlib_detector, dlib_predictor = _get_thread_local_dlib(facial_detector_path)
+    dlib_detector = dlib_predictor = None
+    if DETECTOR in ("dlib_fan", "dlib"):
+        dlib_detector, dlib_predictor = _get_thread_local_dlib(facial_detector_path)
     image_rgb = load_and_prepare_image(cam.image_path, cam)
     if image_rgb is None:
         return cam, None
@@ -686,6 +726,41 @@ def detect_landmarks_all_views(matched_cameras, facial_detector_path, fan_model,
             continue
         per_view[cam.label] = entry
         print(f"Camera {cam.label}: {int(entry['valid'].sum())}/{NUM_LANDMARKS}")
+    return per_view
+
+
+def load_external_detections(path, matched_cameras):
+    """Per-view 68-point detections produced outside this process (--detector
+    external), in the same pixel space the in-process detectors use. The file
+    must say which images it was run on and their size; views are matched by
+    camera label. Only the zero-distortion, no-rotation case is accepted (the
+    external detector sees the stored image as-is), which is what this capture
+    has -- anything else would need the same undistort/rotate as
+    load_and_prepare_image() and is refused rather than silently misaligned."""
+    global EXTERNAL_DETECTIONS
+    z = np.load(path, allow_pickle=False)
+    d = {k: z[k] for k in z.files}
+    if str(d.get("format")) != "gnm_fit_detections_v1":
+        sys.exit(f"[ERROR] {path}: not a gnm_fit_detections_v1 file")
+    if int(d["landmarks_2d"].shape[1]) != NUM_LANDMARKS:
+        sys.exit(f"[ERROR] {path}: {d['landmarks_2d'].shape[1]} points, convention needs {NUM_LANDMARKS}")
+    EXTERNAL_DETECTIONS = d
+    labels = [str(l) for l in d["labels"]]
+    per_view = {}
+    for cam in matched_cameras:
+        if cam.label not in labels:
+            print(f"[WARN] external detections have no entry for {cam.label}")
+            continue
+        i = labels.index(cam.label)
+        w, h = (int(x) for x in d["image_wh"][i])
+        s_ = cam.sensor
+        if (w, h) != (cam.w, cam.h) or any(abs(x) > 0 for x in (s_.k1, s_.k2, s_.k3, s_.p1, s_.p2)):
+            sys.exit(f"[ERROR] {cam.label}: external detections need an unrotated, zero-distortion "
+                     f"image of the calibrated size (got {w}x{h}, calib {cam.w}x{cam.h})")
+        per_view[cam.label] = dict(landmarks_2d=d["landmarks_2d"][i].astype(np.float64),
+                                   valid=d["valid"][i].astype(bool),
+                                   confidence=d["confidence"][i].astype(np.float64), cam=cam)
+        print(f"Camera {cam.label}: {int(per_view[cam.label]['valid'].sum())}/{NUM_LANDMARKS} (external)")
     return per_view
 
 
@@ -1017,6 +1092,108 @@ def save_outputs(results, per_landmark_stats, overall, mesh_path, output_path):
     return obj_path, json_path
 
 
+OBSERVATIONS_FORMAT = "gnm_fit_observations_v1"
+
+
+def save_observations(per_view, candidates, results, holdout, mesh_query, output_dir,
+                      mesh_path, calib_path):
+    """V2: persists every per-view 2D detection that V1 only kept in memory, plus
+    what is needed to reproduce its projection, so the fitter can supervise
+    against the original image evidence instead of only the fused 3D points.
+
+    Pixel space: every landmarks_2d value is in the UNDISTORTED pinhole image
+    of K (the detector runs on cv2.undistort(img, K, dist) with K as the new
+    camera matrix), after the 90-degree rotation recorded in rotated_cw. So
+    projection for fitting is x_cam = R_w2c @ x + t_w2c, then K, with no
+    distortion (fitting/cameras.py does exactly this).
+
+    Per (view, landmark) it also stores the ray/scan evidence from fusion:
+    whether the ray hit the scan, the hit point and its facing, whether the
+    view survived outlier rejection for that landmark, and the residual and
+    visibility of the FINAL fused landmark in that view -- the inputs the
+    fitter uses to reject inconsistent or occluded observations."""
+    labels = sorted(per_view)
+    nv, nl = len(labels), NUM_LANDMARKS
+    lm2d = np.zeros((nv, nl, 2)); valid = np.zeros((nv, nl), bool); conf = np.zeros((nv, nl))
+    K = np.zeros((nv, 3, 3)); c2w = np.zeros((nv, 4, 4)); wh = np.zeros((nv, 2), np.int32)
+    dist = np.zeros((nv, 8)); rot = np.zeros(nv, bool)
+    ray_hit = np.zeros((nv, nl), np.int8); ray_point = np.full((nv, nl, 3), np.nan)
+    facing = np.full((nv, nl), np.nan); kept = np.zeros((nv, nl), bool)
+    fused_px = np.full((nv, nl), np.nan); fused_vis = np.zeros((nv, nl), bool)
+    fused = np.array([r["point"] for r in results])
+    row = {l: i for i, l in enumerate(labels)}
+    for l in labels:
+        i, v, cam = row[l], per_view[l], per_view[l]["cam"]
+        lm2d[i], valid[i], conf[i] = v["landmarks_2d"], v["valid"], v["confidence"]
+        K[i] = build_camera_matrix(cam)[0]
+        c2w[i] = cam.transform_c2w
+        wh[i] = (cam.w, cam.h)
+        s_ = cam.sensor
+        dist[i] = (s_.k1, s_.k2, s_.k3, 0.0, s_.p1, s_.p2, 0.0, 0.0)  # Metashape k1 k2 k3 k4 p1 p2 b1 b2
+        with Image.open(cam.image_path) as im:
+            rot[i] = (im.size[1], im.size[0]) == (cam.w, cam.h) and (cam.w, cam.h) != (cam.h, cam.w)
+        uv, z = project_point(fused, cam)
+        fused_px[i] = np.where(z > 0, np.linalg.norm(uv - v["landmarks_2d"], axis=1), np.nan)
+        o, d = pixel_to_world_ray(uv, cam)
+        hit, hm, _ = mesh_query.raycast(o, d)
+        fused_vis[i] = hm & (z > 0) & (np.linalg.norm(hit - fused, axis=1) < 0.002 * mesh_query.bbox_diagonal)
+    for j, cl in enumerate(candidates):
+        contrib = set(results[j]["contributing"])
+        for c in cl:
+            i = row[c["label"]]
+            ray_hit[i, j] = 1 if c["method"] == "raycast" else 2
+            ray_point[i, j] = c["point"]
+            facing[i, j] = c["facing"]
+            kept[i, j] = c["label"] in contrib
+    hold = np.array([l in holdout for l in labels])
+    source = landmark_sources()
+    base = os.path.join(output_dir, "observations")
+    np.savez(base + ".npz", format=OBSERVATIONS_FORMAT, labels=np.array(labels),
+             image_paths=np.array([per_view[l]["cam"].image_path for l in labels]),
+             landmarks_2d=lm2d, valid=valid, confidence=conf, holdout=hold, image_wh=wh,
+             K=K, c2w=c2w, dist_metashape=dist, rotated_cw=rot, source=source,
+             ray_hit=ray_hit, ray_point=ray_point, facing=facing, kept_in_fusion=kept,
+             fused_residual_px=fused_px, fused_visible=fused_vis, fused_landmarks=fused,
+             detector=DETECTOR)
+    if DETECTOR == "external" and "dense_478" in EXTERNAL_DETECTIONS:
+        # keep the detector's dense points (e.g. MediaPipe's 478) for dense
+        # lid / lip contours (fitting/observations.py feature_source='dense')
+        el = [str(x) for x in EXTERNAL_DETECTIONS["labels"]]
+        dense = np.full((nv,) + EXTERNAL_DETECTIONS["dense_478"].shape[1:], np.nan)
+        for l in labels:
+            if l in el:
+                dense[row[l]] = EXTERNAL_DETECTIONS["dense_478"][el.index(l)]
+        z = dict(np.load(base + ".npz", allow_pickle=False))
+        z["dense_2d"] = dense[..., :2]
+        z["dense_kind"] = np.array("mediapipe_face_mesh_478")
+        np.savez(base + ".npz", **z)
+    ext = {}
+    if DETECTOR == "external":
+        ext = {k: str(EXTERNAL_DETECTIONS[k]) for k in ("detector_name", "detector_version", "source",
+                                                         "mapping_json", "path")
+               if k in EXTERNAL_DETECTIONS}
+    with open(base + ".json", "w") as f:
+        json.dump(dict(
+            format=OBSERVATIONS_FORMAT, landmark_convention=LANDMARK_CONVENTION_NAME,
+            num_landmarks=nl, source_mesh=os.path.abspath(mesh_path),
+            calibration=os.path.abspath(calib_path),
+            pixel_space="undistorted pinhole of K, after rotated_cw; detector input was "
+                        "cv2.undistort(img, K, [k1,k2,p1,p2,k3]) with K as new camera matrix",
+            dist_metashape_order="k1 k2 k3 k4 p1 p2 b1 b2 (k4/b1/b2 not parsed by V1: 0)",
+            detector=DETECTOR, sources=sorted(set(source.tolist())), external=ext,
+            confidence="dlib: sigmoid(HOG score), shared by all dlib points of a view; FAN: heatmap "
+                       "peak / %.2f clipped to [0.05, 1]; external: as provided by the detections "
+                       "file" % FAN_SCORE_NORMALIZATION,
+            ray_hit_codes={"0": "no candidate", "1": "raycast hit", "2": "near-miss fallback"},
+            holdout_views=sorted(holdout & set(labels)),
+            views=[dict(label=l, image=per_view[l]["cam"].image_path,
+                        n_valid=int(valid[row[l]].sum()), holdout=bool(hold[row[l]]),
+                        median_fused_residual_px=float(np.nanmedian(fused_px[row[l]][valid[row[l]]]))
+                        if valid[row[l]].any() else None) for l in labels],
+        ), f, indent=2)
+    return base + ".npz"
+
+
 def generate_debug_visualizations(per_view, results, debug_dir):
     os.makedirs(debug_dir, exist_ok=True)
     for label, view in per_view.items():
@@ -1116,6 +1293,20 @@ def main():
                          help="Path to dlib's shape_predictor_68_face_landmarks.dat "
                               "(same file script-1--neural-registration.py uses; defaults "
                               "to the copy at the repository root).")
+    parser.add_argument("--holdout-views", default="",
+                         help="V2: comma-separated camera labels to HOLD OUT. They are still "
+                              "detected and saved in observations.npz (flagged holdout) for "
+                              "held-out evaluation, but take no part in the 3D fusion. "
+                              "Default: none (V1 behaviour).")
+    parser.add_argument("--detector", default="dlib_fan", choices=DETECTORS,
+                         help="2D landmark detector. dlib_fan (default, original): dlib for "
+                              "jaw/brows/nose, FAN for eyes/mouth on dlib's face box. fan / dlib: "
+                              "that detector alone for all points. external: read --detections.")
+    parser.add_argument("--detections", default=None,
+                         help="gnm_fit_detections_v1 .npz for --detector external (e.g. from "
+                              "scan_landmarks/detect_mediapipe.py).")
+    parser.add_argument("--no-observations", action="store_true",
+                         help="Do not write the V2 per-view observations.npz/.json.")
     parser.add_argument("-j", "--workers", type=int, default=min(8, os.cpu_count() or 4),
                          help="Thread-pool size for per-view detection and per-landmark fusion "
                               "(default: %(default)s). These are the two hot spots that scale "
@@ -1124,6 +1315,10 @@ def main():
                               "and run fully sequential.")
     args = parser.parse_args()
     set_landmark_convention("gnm" if args.gnm else "flame")
+    global DETECTOR
+    DETECTOR = args.detector
+    if (DETECTOR == "external") != (args.detections is not None):
+        sys.exit("[ERROR] --detections is required with --detector external, and only then.")
 
     input_dir = os.path.abspath(args.input)
     mesh_path = os.path.join(input_dir, "model.obj")
@@ -1195,17 +1390,24 @@ def main():
     print("Detecting facial landmarks")
     print("=" * 60)
     print(f"[INFO] landmark convention: {LANDMARK_CONVENTION_NAME} ({NUM_LANDMARKS} points)")
-    print(f"[INFO] dlib (CPU) sources indices 0-{NUM_DLIB_LANDMARKS_USED - 1}; "
-          f"face-alignment/FAN ({device}) sources indices {NUM_DLIB_LANDMARKS_USED}-{NUM_LANDMARKS - 1} "
-          f"-- see module docstring for why FAN substitutes for script-1's MediaPipe call.")
+    print(f"[INFO] detector: {DETECTOR}")
+    if DETECTOR == "dlib_fan":
+        print(f"[INFO] dlib (CPU) sources indices 0-{NUM_DLIB_LANDMARKS_USED - 1}; "
+              f"face-alignment/FAN ({device}) sources indices {NUM_DLIB_LANDMARKS_USED}-{NUM_LANDMARKS - 1} "
+              f"-- see module docstring for why FAN substitutes for script-1's MediaPipe call.")
     print(f"[INFO] using {args.workers} worker thread(s) for per-view detection and per-landmark fusion")
-    if not os.path.isfile(args.facial_detector):
-        sys.exit(f"[ERROR] --facial-detector not found: {args.facial_detector}")
-    fan_model = face_alignment.FaceAlignment(
-        face_alignment.LandmarksType.TWO_D, device=device, flip_input=False, compile=False,
-    )
-    per_view = detect_landmarks_all_views(
-        matched_cameras, args.facial_detector, fan_model, num_workers=args.workers)
+    if DETECTOR == "external":
+        per_view = load_external_detections(args.detections, matched_cameras)
+    else:
+        if DETECTOR in ("dlib_fan", "dlib") and not os.path.isfile(args.facial_detector):
+            sys.exit(f"[ERROR] --facial-detector not found: {args.facial_detector}")
+        fan_model = None
+        if DETECTOR in ("dlib_fan", "fan"):
+            fan_model = face_alignment.FaceAlignment(
+                face_alignment.LandmarksType.TWO_D, device=device, flip_input=False, compile=False,
+            )
+        per_view = detect_landmarks_all_views(
+            matched_cameras, args.facial_detector, fan_model, num_workers=args.workers)
     if not per_view:
         sys.exit("[ERROR] No usable views after landmark detection (all failed to load or detect a face).")
 
@@ -1213,14 +1415,22 @@ def main():
     print("=" * 60)
     print("Multi-view landmark reconstruction")
     print("=" * 60)
-    candidates = generate_ray_candidates(per_view, mesh_query)
+    holdout = {h.strip() for h in args.holdout_views.split(",") if h.strip()}
+    unknown = holdout - set(per_view)
+    if unknown:
+        print(f"[WARN] --holdout-views not among the detected views: {sorted(unknown)}")
+    fit_views = {k: v for k, v in per_view.items() if k not in holdout}
+    if holdout:
+        print(f"[INFO] holding out {len(per_view) - len(fit_views)} view(s) from fusion: "
+              f"{sorted(holdout & set(per_view))}")
+    candidates = generate_ray_candidates(fit_views, mesh_query)
     results = fuse_all_landmarks(candidates, mesh_query, num_workers=args.workers)
 
     print()
     print("=" * 60)
     print("Reprojection validation")
     print("=" * 60)
-    per_landmark_stats, overall = compute_reprojection_diagnostics(results, per_view, num_workers=args.workers)
+    per_landmark_stats, overall = compute_reprojection_diagnostics(results, fit_views, num_workers=args.workers)
 
     print()
     print("=" * 60)
@@ -1235,6 +1445,10 @@ def main():
         print(f"95th percentile reprojection error: {overall['p95_reprojection_error_px']:.2f} px")
 
     obj_path, json_path = save_outputs(results, per_landmark_stats, overall, mesh_path, output_path)
+    if not args.no_observations:
+        obs_path = save_observations(per_view, candidates, results, holdout, mesh_query,
+                                     output_dir, mesh_path, calib_path)
+        print(f"    {obs_path} (+ .json)")
     print()
     print("Saved:")
     print(f"    {output_path}")
