@@ -1,0 +1,14 @@
+{
+  "_note": "test_004: test_003 + per-frame torso-vs-head articulation (GNM head joint with the head held fixed, prior sigma 10 deg, temporal smoothness) + neck silhouette (neck 1.0, neck_low 0.3).",
+  "lam": {"silhouette": 15.0, "sil_over": 5.0},
+  "silhouette": {
+    "enabled": true, "lam": 15.0, "lam_over": 5.0, "sigma_px": 2.5, "gate_px": 30.0, "max_points": 2500,
+    "jaw_suppress_px": 25.0,
+    "region_w": {"nose": 1.0, "cheek": 1.0, "temple_forehead": 1.0, "chin_jaw": 1.0, "jaw_under": 1.0, "lips": 1.0,
+                 "face_other": 1.0, "neck": 1.0, "neck_low": 0.3, "ear": 0.0, "scalp_back": 0.0}
+  },
+  "neck_articulation": {"enabled": true},
+  "prior": {"neck_sigma_rad": 0.1745, "neck_smooth": 0.5},
+  "stages": {"s2": {"lam_mult": {"silhouette": 0.5, "sil_over": 0.5}, "neck": true, "lr": {"neck": 0.003}},
+             "s3": {"neck": true, "lr": {"neck": 0.002}}}
+}

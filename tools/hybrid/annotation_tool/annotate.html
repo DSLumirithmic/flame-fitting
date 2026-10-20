@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>GNM boundary annotation</title>
+<style>
+:root{--bg:#1d1f22;--panel:#2a2d31;--fg:#e6e6e6;--mut:#9aa0a6;--acc:#4fc3f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,Segoe UI,sans-serif;display:flex;height:100vh;overflow:hidden}
+#side{width:300px;background:var(--panel);display:flex;flex-direction:column;border-right:1px solid #000}
+#side h1{font-size:14px;margin:10px}
+#list{flex:1;overflow:auto;border-top:1px solid #000}
+.it{padding:3px 10px;cursor:pointer;display:flex;justify-content:space-between;white-space:nowrap}
+.it:hover{background:#34383d}.it.cur{background:#0d47a1}
+.st{font-size:11px;color:var(--mut)}.st.saved{color:#81c784}.st.nv{color:#ffb74d}.st.dirty{color:#e57373}
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#bar{background:var(--panel);padding:6px 10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #000}
+#instr{background:#23262a;padding:6px 10px;border-bottom:1px solid #000;color:#ffe082;max-height:90px;overflow:auto}
+#wrap{flex:1;position:relative;overflow:hidden;cursor:crosshair}
+canvas{position:absolute;left:0;top:0}
+button{background:#3b4046;color:var(--fg);border:1px solid #555;border-radius:3px;padding:3px 8px;cursor:pointer}
+button:hover{background:#4a5057}button.prim{background:#1565c0;border-color:#1e88e5}
+input[type=text]{background:#111;color:var(--fg);border:1px solid #555;padding:2px 5px}
+#help{font-size:11px;color:var(--mut);padding:6px 10px;border-top:1px solid #000}
+#msg{color:#81c784}.k{color:var(--acc)}
+</style></head><body>
+<div id="side"><h1>Boundary annotation</h1>
+<div style="padding:0 10px 8px">Annotator: <input id="who" type="text" size="14" placeholder="your name"> <button id="load">load</button></div>
+<div id="list"></div>
+<div id="help">
+<b>Mouse</b>: left-click = add point to current stroke; drag a point to move it; wheel = zoom; right-drag = pan.<br>
+<b>Keys</b>: <span class="k">N</span> new stroke, <span class="k">U</span> toggle certain/uncertain, <span class="k">C</span> toggle closed,
+<span class="k">Backspace</span> delete last point, <span class="k">Del</span> delete stroke, <span class="k">[ ]</span> select stroke,
+<span class="k">Ctrl+S</span> save, <span class="k">PgUp/PgDn</span> prev/next item (saves), <span class="k">F</span> fit view.<br>
+Green = certain, orange dashed = uncertain. Points every ~5-10 px along the edge are enough.
+</div></div>
+<div id="main">
+<div id="bar"><b id="title">-</b>
+<label><input type="checkbox" id="nv"> not visible / not applicable</label>
+<label id="mclab"><input type="checkbox" id="mc"> mouth closed</label>
+<label>brightness <input type="range" id="br" min="50" max="300" value="100"></label>
+<label>contrast <input type="range" id="ct" min="50" max="300" value="100"></label>
+note <input type="text" id="note" size="24">
+<button id="prev">&laquo; prev</button><button id="save" class="prim">save</button><button id="next">next &raquo;</button>
+<span id="msg"></span></div>
+<div id="instr"></div>
+<div id="wrap"><canvas id="cv"></canvas></div>
+</div>
+<script>
+let M=null, idx=0, img=null, ann={}, saved={}, dirty=false, cur=0, view={s:1,x:0,y:0}, drag=null, pan=null;
+const $=id=>document.getElementById(id), cv=$('cv'), ctx=cv.getContext('2d'), wrap=$('wrap');
+function blank(it){return {schema:'gnm_hybrid_annotation_v1',item:it.id,view:it.view,region:it.region,annotator:'',
+  not_visible:false,mouth_closed:null,note:'',strokes:[{type:'certain',closed:false,points:[]}],crop:it.crop,image_sha256:it.image_sha256};}
+function A(){const it=M.items[idx]; if(!ann[it.id]) ann[it.id]=blank(it); return ann[it.id];}
+function who(){return $('who').value.trim();}
+function status(it){const a=ann[it.id];
+  if(dirty&&it===M.items[idx]) return ['unsaved','dirty'];
+  if(!saved[it.id]) return ['-',''];
+  if(a&&a.not_visible) return ['not visible','nv'];
+  const n=a?a.strokes.reduce((s,k)=>s+k.points.length,0):0; return ['saved ('+n+')','saved'];}
+function renderList(){const L=$('list'); L.innerHTML='';
+  M.items.forEach((it,i)=>{const d=document.createElement('div'); d.className='it'+(i===idx?' cur':'');
+    const [t,c]=status(it); d.innerHTML='<span>'+it.view.replace('frame_','')+' &middot; '+it.region+'</span><span class="st '+c+'">'+t+'</span>';
+    d.onclick=()=>go(i); L.appendChild(d);});
+  const c=L.children[idx]; if(c) c.scrollIntoView({block:'nearest'});}
+function fit(){const r=wrap.getBoundingClientRect(); cv.width=r.width; cv.height=r.height; if(!img) return;
+  const s=Math.min(r.width/img.width, r.height/img.height)*0.95; view={s:s,x:(r.width-img.width*s)/2,y:(r.height-img.height*s)/2}; draw();}
+function toScr(p){const c=M.items[idx].crop; return [(p[0]-c.x0)*view.s+view.x,(p[1]-c.y0)*view.s+view.y];}
+function toImg(x,y){const c=M.items[idx].crop; return [(x-view.x)/view.s+c.x0,(y-view.y)/view.s+c.y0];}
+function draw(){ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height); if(!img) return;
+  ctx.imageSmoothingEnabled=view.s<2; ctx.filter='brightness('+$('br').value+'%) contrast('+$('ct').value+'%)';
+  ctx.drawImage(img,view.x,view.y,img.width*view.s,img.height*view.s); ctx.filter='none';
+  const a=A(); a.strokes.forEach((st,si)=>{ if(!st.points.length) return;
+    ctx.lineWidth=si===cur?2:1.3; ctx.strokeStyle=st.type==='certain'?'#00e676':'#ffa726'; ctx.setLineDash(st.type==='certain'?[]:[6,4]);
+    ctx.beginPath(); st.points.forEach((p,i)=>{const q=toScr(p); i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]);});
+    if(st.closed&&st.points.length>2) ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+    st.points.forEach((p,i)=>{const q=toScr(p); ctx.beginPath(); ctx.arc(q[0],q[1],si===cur?3:2,0,7);
+      ctx.fillStyle=si===cur?(i===st.points.length-1?'#ff1744':'#ffffff'):'#bbbbbb'; ctx.fill();});});
+  ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(4,4,330,20); ctx.fillStyle='#fff';
+  const st=a.strokes[cur]; ctx.fillText('stroke '+(cur+1)+'/'+a.strokes.length+' : '+st.type+(st.closed?', closed':'')+'   zoom '+view.s.toFixed(2)+'x',10,18);}
+function syncForm(){const a=A(), it=M.items[idx]; $('nv').checked=!!a.not_visible; $('mc').checked=!!a.mouth_closed; $('note').value=a.note||'';
+  $('mclab').style.display=it.region==='mouth_opening'?'':'none'; $('title').textContent=it.view+'  /  '+it.region;
+  $('instr').textContent=M.instructions[it.region];}
+function go(i){if(dirty) save(); idx=Math.max(0,Math.min(M.items.length-1,i)); cur=0; const it=M.items[idx];
+  img=new Image(); img.onload=()=>{fit();}; img.src=it.file; syncForm(); renderList(); $('msg').textContent='';}
+function mark(){dirty=true; renderList(); draw();}
+async function save(){const w=who(); if(!/^[A-Za-z0-9_.-]{1,64}$/.test(w)){alert('Enter an annotator name (letters, digits, _ . -) first.'); return false;}
+  const a=A(); a.annotator=w; a.not_visible=$('nv').checked; a.note=$('note').value;
+  a.mouth_closed=M.items[idx].region==='mouth_opening'?$('mc').checked:null;
+  a.strokes=a.strokes.filter((s,i)=>s.points.length||i===0);
+  try{const r=await fetch('api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(a)}); const j=await r.json();
+    if(!j.ok) throw new Error(j.error); saved[a.item]=true; dirty=false; $('msg').textContent='saved '+j.file; renderList(); return true;}
+  catch(e){alert('save failed: '+e.message); return false;}}
+async function loadLatest(){const w=who(); if(!w) return; localStorage.setItem('gnm_annot_who',w);
+  const r=await fetch('api/latest?annotator='+encodeURIComponent(w)); const j=await r.json(); if(j.error){alert(j.error);return;}
+  ann={}; saved={}; for(const k in j){ann[k]=j[k]; saved[k]=true;} dirty=false; go(idx);}
+function nearest(x,y){const a=A(); let best=null,bd=8; a.strokes.forEach((st,si)=>st.points.forEach((p,pi)=>{const q=toScr(p); const d=Math.hypot(q[0]-x,q[1]-y); if(d<bd){bd=d;best=[si,pi];}})); return best;}
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('mousedown',e=>{const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  if(e.button===2||e.button===1){pan=[x,y,view.x,view.y];return;}
+  const n=nearest(x,y); if(n){cur=n[0]; drag=n; draw(); return;}
+  A().strokes[cur].points.push(toImg(x,y)); mark();});
+window.addEventListener('mousemove',e=>{const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  if(pan){view.x=pan[2]+x-pan[0]; view.y=pan[3]+y-pan[1]; draw(); return;}
+  if(drag){A().strokes[drag[0]].points[drag[1]]=toImg(x,y); mark();}});
+window.addEventListener('mouseup',()=>{pan=null; drag=null;});
+cv.addEventListener('wheel',e=>{e.preventDefault(); const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  const f=e.deltaY<0?1.2:1/1.2; view.x=x-(x-view.x)*f; view.y=y-(y-view.y)*f; view.s*=f; draw();},{passive:false});
+window.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.type==='text') return; const a=A(), st=a.strokes[cur];
+  if(e.ctrlKey&&e.key==='s'){e.preventDefault(); save(); return;}
+  switch(e.key){case 'n':case 'N': if(st.points.length){a.strokes.push({type:'certain',closed:false,points:[]}); cur=a.strokes.length-1;} draw(); break;
+    case 'u':case 'U': st.type=st.type==='certain'?'uncertain':'certain'; mark(); break;
+    case 'c':case 'C': st.closed=!st.closed; mark(); break;
+    case 'Backspace': e.preventDefault(); st.points.pop(); mark(); break;
+    case 'Delete': a.strokes.splice(cur,1); if(!a.strokes.length) a.strokes.push({type:'certain',closed:false,points:[]}); cur=Math.min(cur,a.strokes.length-1); mark(); break;
+    case '[': cur=(cur-1+a.strokes.length)%a.strokes.length; draw(); break;
+    case ']': cur=(cur+1)%a.strokes.length; draw(); break;
+    case 'f':case 'F': fit(); break;
+    case 'PageDown': e.preventDefault(); go(idx+1); break;
+    case 'PageUp': e.preventDefault(); go(idx-1); break;}});
+['nv','mc'].forEach(k=>$(k).onchange=()=>{A().not_visible=$('nv').checked; A().mouth_closed=$('mc').checked; dirty=true; renderList();});
+$('note').oninput=()=>{A().note=$('note').value; dirty=true;};
+['br','ct'].forEach(k=>$(k).oninput=draw);
+$('save').onclick=save; $('next').onclick=()=>go(idx+1); $('prev').onclick=()=>go(idx-1); $('load').onclick=loadLatest;
+window.addEventListener('resize',fit);
+window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault(); e.returnValue='';}});
+fetch('manifest.json').then(r=>r.json()).then(m=>{M=m; $('who').value=localStorage.getItem('gnm_annot_who')||''; if(who()) loadLatest(); else go(0);});
+</script></body></html>

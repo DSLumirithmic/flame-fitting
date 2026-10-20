@@ -4,6 +4,8 @@ Fits Google's [GNM](https://github.com/google/gnm) head model (v3, head
 variant) to a 3D scan, using 68-point iBUG landmarks detected directly on the
 scan from its calibrated photos.
 
+**Image-only fit with hybrid segmentation (this branch):** see [HYBRID_SEGMENTATION.md](HYBRID_SEGMENTATION.md) and [image_only/README.md](image_only/README.md).
+
 ```
 scan folder (model.obj + calibration.xml + views/)
    -> scan_landmarks/generate_scan_landmarks.py --gnm   (68 3D landmarks)

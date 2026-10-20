@@ -326,6 +326,56 @@ class CollisionTerm:
         v = self.per_group(verts)
         return sum((x ** 2).sum() for x in v.values()) / 100.0
 
+    def _concat(self):
+        ''' All pair groups concatenated (built once) for the batched path. '''
+        c = getattr(self, '_cat', None)
+        if c is None:
+            gs = list(self.groups.values())
+            c = dict(q=torch.cat([g['q'] for g in gs]),
+                     triv=self.F[torch.cat([g['tri'] for g in gs])],                    # (N,k,3) vertex ids
+                     sign=torch.cat([g['sign'] for g in gs]),
+                     margin=torch.cat([g['margin'] for g in gs]),
+                     valid=torch.cat([g['valid'] for g in gs]),
+                     slack=torch.cat([torch.full((len(g['q']),), g['slack'], dtype=g['margin'].dtype,
+                                                 device=g['margin'].device) for g in gs]))
+            self._cat = c
+        return c
+
+    def batched(self, verts):
+        ''' Same loss as __call__, for a batch of meshes (B,V,3) -> (B,), with
+        all pair groups and all meshes evaluated together. The nearest-candidate
+        search runs without gradient on detached vertices; only the chosen
+        triangle's three vertices (and the query vertex) are gathered with
+        gradient, which gives the same gradient as __call__ (whose candidate
+        gather receives zero gradient for the unchosen candidates). '''
+        c = self._concat()
+        B, nv = verts.shape[0], verts.shape[1]
+        N = c['q'].shape[0]
+        ar = torch.arange(N, device=verts.device)
+        with torch.no_grad():
+            vd = verts.detach() * MM_PER_M
+            p = vd[:, c['q']]                                         # (B,N,3)
+            tv = vd[:, c['triv']]                                     # (B,N,k,3,3)
+            a, b, cc = tv[..., 0, :], tv[..., 1, :], tv[..., 2, :]
+            pk = p[:, :, None].expand_as(a)
+            cp = closest_point_on_triangle(pk, a, b, cc)
+            dist = (pk - cp).norm(dim=-1).masked_fill(~c['valid'][None], float('inf'))
+            best = dist.argmin(dim=-1)                                # (B,N)
+            sel = c['triv'][ar[None], best]                           # (B,N,3)
+            idx = torch.cat([c['q'][None, :, None].expand(B, N, 1), sel], -1)
+            idx = idx + (torch.arange(B, device=verts.device) * nv)[:, None, None]
+        X = verts.reshape(-1, 3)[idx.reshape(-1)].reshape(B, N, 4, 3) * MM_PER_M
+        p, a, b, cc = X[:, :, 0], X[:, :, 1], X[:, :, 2], X[:, :, 3]
+        n = triangle_normals(a, b, cc)
+        sd = ((p - a) * n).sum(-1) * c['sign'][ar[None], best]
+        with torch.no_grad():
+            d = p - closest_point_on_triangle(p, a, b, cc)
+            tangential = (d - (d * n).sum(-1, keepdim=True) * n).norm(dim=-1)
+            active = c['valid'][ar[None], best] & (tangential < c['slack'][None])
+        m = c['margin'][ar[None], best]
+        v = torch.relu(m - sd) * active
+        return (v ** 2).sum(-1) / 100.0
+
     @torch.no_grad()
     def report(self, verts, thresh_mm=0.0):
         ''' {name: (n violating, max violation mm, n penetrating)} where

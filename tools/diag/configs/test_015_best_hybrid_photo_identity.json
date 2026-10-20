@@ -1,0 +1,22 @@
+{
+ "_note": "test_015: resume the best hybrid run among test_012-014 (chosen on TRAINING views only: lowest mean of per-region median |model - annotation| over throat, chin_profile, jaw, ears, lip_vermilion, with training MediaPipe landmark medians not worse than test_004 by > 0.2 px) and run test_009's identity-only photometric stage: 300 Adam iterations on id_head (170) + id_eye (3), everything else frozen, all objective terms of the resumed run kept (incl. the hybrid terms). Photometric weight FIXED at test_009's absolute lambda (17.372806640393673, not recalibrated); the effective photometric / landmark identity-gradient ratio is logged (gradient_log.weighted_ratio).",
+ "resume_stage": {
+  "iters": 300,
+  "lr": 0.01,
+  "refresh": 5,
+  "vis_refresh": 25,
+  "photo_refresh": 25,
+  "grad_log_every": 25,
+  "photo_weight_mode": "fixed",
+  "photo_lambda": 17.372806640393673,
+  "photo_grad_ratio": 0.25
+ },
+ "photometric": {
+  "regions": [
+   "nose",
+   "cheek",
+   "temple_forehead",
+   "lips"
+  ]
+ }
+}

@@ -29,6 +29,8 @@ dependencies = [
     "dlib-bin>=20.0.1.post1",     # prebuilt dlib (Windows + Linux), imports as `dlib`
     "face-alignment>=1.5.0",
     "face-recognition-models>=0.3.0",  # ships shape_predictor_68_face_landmarks.dat
+    # image_only/raycast_warp.py: GPU ray casting for the image-only fitter (Apache-2.0)
+    "warp-lang==1.18.0",
 ]
 
 # Script repo, not an installable library.

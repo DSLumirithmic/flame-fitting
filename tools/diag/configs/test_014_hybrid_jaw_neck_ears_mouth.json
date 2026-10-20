@@ -1,0 +1,74 @@
+{
+ "_note": "test_014: test_013 + SAM 2 lip vermilion (outer border) matched to the model vermilion border; MediaPipe outer-lip samples suppressed near reliable SAM borders. All 13 frames have a closed mouth, so this tests the vermilion only. NOT ANNOTATION-GATED: on 2026-10-20 the user asked to continue without the human annotations, so the segmentation boundaries are used without the pre-registered annotation gate; the gate and the annotation-based evaluation are to be run once the annotations exist.",
+ "lam": {
+  "silhouette": 15.0,
+  "sil_over": 5.0,
+  "hybrid": 1.0
+ },
+ "silhouette": {
+  "enabled": true,
+  "lam": 15.0,
+  "lam_over": 5.0,
+  "sigma_px": 2.5,
+  "gate_px": 30.0,
+  "max_points": 2500,
+  "jaw_suppress_px": 0,
+  "region_w": {
+   "nose": 1.0,
+   "cheek": 1.0,
+   "temple_forehead": 1.0,
+   "chin_jaw": 0.0,
+   "jaw_under": 0.0,
+   "lips": 1.0,
+   "face_other": 1.0,
+   "neck": 0.0,
+   "neck_low": 0.0,
+   "ear": 0.0,
+   "scalp_back": 0.0
+  }
+ },
+ "neck_articulation": {
+  "enabled": true
+ },
+ "prior": {
+  "neck_sigma_rad": 0.1745,
+  "neck_smooth": 0.5
+ },
+ "stages": {
+  "s2": {
+   "lam_mult": {
+    "silhouette": 0.5,
+    "sil_over": 0.5,
+    "hybrid": 0.5
+   },
+   "neck": true,
+   "lr": {
+    "neck": 0.003
+   }
+  },
+  "s3": {
+   "neck": true,
+   "lr": {
+    "neck": 0.002
+   }
+  }
+ },
+ "hybrid": {
+  "enabled": true,
+  "masks_dir": "C:\\GitHub\\GNM-fit\\outputs\\hybrid_v1\\masks_v1",
+  "skinseg_subdir": "skinseg_2tier",
+  "sam2_subdir": "sam2_v2",
+  "gate_report": null,
+  "require_gate": false,
+  "jaw_neck": {
+   "enabled": true
+  },
+  "ears": {
+   "enabled": true
+  },
+  "mouth": {
+   "enabled": true
+  },
+  "gate_status": "NOT GATED (user instruction 2026-10-20: continue without human annotations)"
+ }
+}
